@@ -1,5 +1,7 @@
 # Jay
 
+[![CI](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml/badge.svg)](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml)
+
 Terminal project manager, git-like: one `.nest/` folder per project.
 
 <figure align="center">
