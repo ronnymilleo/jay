@@ -1,0 +1,4 @@
+name = "beta"
+description = "Second example project"
+links = []
+git_integration = "off"

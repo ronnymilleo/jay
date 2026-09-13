@@ -1,0 +1,12 @@
+/target
+/data
+/.nest/
+.idea/
+.vscode/
+**/.nest/lock
+
+# Keep only the public Markdown documentation.
+*.md
+!README.md
+!docs/CLI-TUTORIAL.md
+!docs/SETUP.md
