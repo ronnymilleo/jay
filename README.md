@@ -1,6 +1,13 @@
-# jay
+# Jay
 
 Terminal project manager, git-like: one `.nest/` folder per project.
+
+<figure align="center">
+  <img src="https://github.com/user-attachments/assets/ad4e1b4e-2df7-4f86-8d0e-ca82b99ee85a" alt="Gralha-Azul — mascot of Jay">
+  <figcaption>
+    <em>AI-Generated image, if you are a real artist and want to contribute with your artwork, I'll be happy to replace it.</em>
+  </figcaption>
+</figure>
 
 ## What is jay?
 
