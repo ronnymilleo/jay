@@ -2,6 +2,25 @@
 
 Terminal project manager, git-like: one `.nest/` folder per project.
 
+## What is jay?
+
+**jay** is named after the azure jay (*Cyanocorax caeruleus*, the
+gralha-azul) — a corvid from southern Brazil and the state bird of Paraná.
+Jays are clever, loud, and obsessed with storing food for later. The azure
+jay takes it further: it buries thousands of araucaria seeds every year and
+forgets where it hid some of them. Those forgotten seeds grow into entire
+forests.
+
+That is the idea behind this tool. Tasks, decisions, and project knowledge
+are seeds: jay helps you stash them in one place — the `.nest/` folder — and
+even the ones you "forget" keep working for you, because everything is
+plain-text TOML, versioned with git, and readable by both humans and AI
+agents. Years later, `git log` shows exactly what grew, when, and why.
+
+A jay also never wastes a trip: it carries food, tools, and gossip between
+trees. Here, the CLI and the MCP server share the same data, so your
+terminal sessions and your coding agents always see the same forest.
+
 ## Concept
 
 - **Project = folder.** `jay init` in a folder turns it into a project: a
