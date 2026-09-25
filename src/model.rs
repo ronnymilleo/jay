@@ -297,7 +297,7 @@ pub struct Task {
     /// Does not imply a dependency unless one is requested separately.
     #[serde(default)]
     pub follow_up_of: Option<i64>,
-    /// Last writer: "human" (CLI) or "agent:<name>" (MCP).
+    /// Last writer: "human" or "agent:<name>" (CLI or MCP).
     pub actor: Option<String>,
     /// Last change timestamp.
     pub updated_at: String,
@@ -531,7 +531,10 @@ impl Task {
 /// these belong to a completion cycle and are snapshotted into history on
 /// reopen. Manual links stay on the task.
 pub fn is_integration_link(link: &str) -> bool {
-    link.starts_with("branch:") || link.starts_with("pr:") || link.contains("/pulls/")
+    link.starts_with("branch:")
+        || link.starts_with("pr:")
+        || link.starts_with("commit:")
+        || link.contains("/pulls/")
 }
 
 /// Kind of knowledge base entry.

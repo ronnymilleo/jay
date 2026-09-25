@@ -63,8 +63,10 @@ Deliver a task (start -> review -> typed completion):
                          "validation": "how it was verified",
                          "problems": ["..."], "ideas": [], "decisions": ["..."]}
 
-`complete_task` requires the task to be in review; result and validation must
-be nonblank; on any validation failure nothing changes.
+`complete_task` requires review when Git integration is `auto`. With Git
+integration `off`, it also accepts a started task and records review and close
+atomically. Result and validation must be nonblank; on validation failure
+nothing changes.
 
 Partial edit (omitted fields unchanged; null clears nullable fields):
 

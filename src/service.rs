@@ -678,20 +678,28 @@ pub fn update_report_section_legacy(
     update_report(root, id, upd, ReportMode::Replace, actor)
 }
 
-/// Saves the report and closes a task already in review, in one local atomic
-/// mutation. Review is never silently skipped; a validation failure changes
-/// nothing (the original bytes stay intact).
+/// Saves the report and closes a task in one local atomic mutation. With Git
+/// integration off, a started task may be completed without a separate review
+/// command. A validation failure leaves the original bytes untouched.
 pub fn complete_task(root: &Path, id: i64, upd: ReportUpdate, actor: &str) -> Result<Task> {
     let _lock = ProjectLock::acquire(root)?;
     let path = tasks::task_file(root, id);
     let (raw, mut task) = load_raw_and_task(root, id)?;
-    if task.status != TaskStatus::Review {
+    let local_started = task.status == TaskStatus::Started
+        && project::load_config(root)?.effective_git_integration() == project::GitIntegration::Off;
+    if task.status != TaskStatus::Review && !local_started {
         bail!(
-            "complete requires a task in review (task {id} is {}); move it to review first — review is never silently skipped",
+            "complete requires a task in review, or started with Git integration off (task {id} is {})",
             task.status.as_str()
         );
     }
     apply_report(&mut task, &upd, ReportMode::Replace)?;
+    if local_started {
+        task.apply(
+            TaskAction::Review,
+            &crate::model::LifecycleCtx::new(actor, None),
+        )?;
+    }
     // enforces completion evidence; records the lifecycle event
     task.apply(
         TaskAction::Done,
@@ -702,6 +710,40 @@ pub fn complete_task(root: &Path, id: i64, upd: ReportUpdate, actor: &str) -> Re
     task.updated_at = now_ts();
     write_task_preserving(&path, &task, &raw)?;
     Ok(task)
+}
+
+/// Attach a verified local commit to the current completion cycle. The
+/// reference is informational and never performs Git network operations.
+pub fn link_commit(root: &Path, id: i64, reference: &str, actor: &str) -> Result<Task> {
+    if reference.trim().is_empty() {
+        bail!("commit reference must not be blank");
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .output()
+        .context("cannot run git to verify commit")?;
+    if !output.status.success() {
+        bail!("'{reference}' does not resolve to a local commit");
+    }
+    let commit = String::from_utf8(output.stdout)?.trim().to_string();
+    let _lock = ProjectLock::acquire(root)?;
+    mutate_task_locked(root, id, |task| {
+        if task.status != TaskStatus::Closed {
+            bail!("task {id} must be closed before linking its completion commit");
+        }
+        task.links.retain(|link| !link.starts_with("commit:"));
+        task.links.push(format!("commit:{commit}"));
+        task.actor = Some(actor.to_string());
+        Ok(())
+    })?;
+    tasks::load_task(root, id)?.ok_or_else(|| anyhow::anyhow!("task {id} not found"))
 }
 
 /// Lifecycle entry point shared by CLI and MCP: state-machine transition plus

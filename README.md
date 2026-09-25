@@ -35,8 +35,8 @@ terminal sessions and your coding agents always see the same forest.
 - **Project = folder.** `jay init` in a folder turns it into a project: a
   `.nest/` directory holds the config and the tasks (one TOML file per task).
   No "registering projects" — you just cd into the folder.
-- **Task = contract with a schema**: whoever works on it (a human via the CLI,
-  or an agent via MCP) fills in every field and reports through the standard
+- **Task = contract with a schema**: whoever works on it (a human or agent via
+  the CLI or MCP) fills in every field and reports through the standard
   sections (result, validation, problems, ideas, decisions). Closing a task
   requires nonblank result and validation — jay never fabricates evidence.
 - **Plain-text data**: tasks are TOML files committed with the project, so
@@ -162,6 +162,9 @@ flag (with a reason) that pauses transitions until unblock. start records
 started_at; close records done_at and requires nonblank report result and
 validation. Every transition records a lifecycle event (actor, RFC 3339
 timestamp with offset, old/new state, reason) in the task's `history`.
+CLI writes default to `human`; agents using the CLI can set `JAY_ACTOR` or
+pass the global `--actor agent:<name>` option. MCP writes record
+`agent:<name>` by default.
 
 `closed` tasks can be reopened: `reopen` (CLI `--reason`, MCP `reason`) works
 from cancelled AND from closed — reopening a closed task requires a nonblank
