@@ -4,6 +4,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use comfy_table::{presets, Cell, CellAlignment, Color, ContentArrangement, Table};
 
@@ -14,6 +15,7 @@ use crate::tasks;
 
 /// Global `--no-color` flag (set once at startup; a single-shot CLI).
 static NO_COLOR: AtomicBool = AtomicBool::new(false);
+static ACTOR: OnceLock<String> = OnceLock::new();
 
 /// Table border style.
 #[derive(Clone, Copy, ValueEnum)]
@@ -42,6 +44,25 @@ impl BorderStyle {
     }
 }
 
+fn actor() -> &'static str {
+    ACTOR.get().map(String::as_str).unwrap_or("human")
+}
+
+fn validate_actor(value: &str) -> Result<()> {
+    if value == "human"
+        || value.strip_prefix("agent:").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        })
+    {
+        Ok(())
+    } else {
+        bail!("actor must be 'human' or 'agent:<name>' (letters, digits, '.', '_' or '-')")
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "jay",
@@ -49,6 +70,9 @@ impl BorderStyle {
 )]
 #[command(version)]
 struct Cli {
+    /// Actor recorded for CLI writes (overrides JAY_ACTOR; default: human).
+    #[arg(long, global = true)]
+    actor: Option<String>,
     /// Disable ANSI colors.
     #[arg(long, global = true)]
     no_color: bool,
@@ -180,10 +204,10 @@ enum TaskCmd {
         #[command(flatten)]
         table_args: TableArgs,
     },
-    /// Start a task (open -> started; creates a branch).
+    /// Start a task (open -> started; creates a branch only with git_integration=auto).
     #[command(alias = "do")]
     Start { id: i64 },
-    /// Send a task to review (started -> review; opens a PR).
+    /// Send a task to review (started -> review; opens a PR only with git_integration=auto).
     Review { id: i64 },
     /// Close a task (review -> closed).
     Done { id: i64 },
@@ -249,7 +273,7 @@ enum TaskCmd {
         #[arg(long)]
         append: bool,
     },
-    /// Save the report and close a task already in review, atomically.
+    /// Save the report and close atomically (from started when Git integration is off, or from review).
     /// Requires nonblank result and validation; on failure nothing changes.
     Complete {
         id: i64,
@@ -257,6 +281,8 @@ enum TaskCmd {
         #[arg(long)]
         report_file: String,
     },
+    /// Link a closed task to a verified local completion commit.
+    LinkCommit { id: i64, commit: String },
 }
 
 #[derive(Subcommand)]
@@ -276,6 +302,8 @@ enum KbCmd {
     /// Show the current project summary (designated entry plus provenance
     /// and freshness facts, or the labeled highest-id fallback).
     Status,
+    /// Print a reviewable status draft from tasks changed since the current summary.
+    DraftStatus,
     /// List knowledge base entries.
     #[command(alias = "ls")]
     List {
@@ -381,6 +409,12 @@ enum KbCmd {
 /// exits 2 for those).
 pub fn run() -> Result<i32> {
     let cli = Cli::parse();
+    let selected_actor = cli
+        .actor
+        .or_else(|| std::env::var("JAY_ACTOR").ok())
+        .unwrap_or_else(|| "human".to_string());
+    validate_actor(&selected_actor)?;
+    let _ = ACTOR.set(selected_actor);
     NO_COLOR.store(cli.no_color, Ordering::Relaxed);
     match cli.command {
         Command::Init { name } => {
@@ -460,6 +494,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             append,
         } => cmd_task_report(id, report_file, append),
         TaskCmd::Complete { id, report_file } => cmd_task_complete(id, report_file),
+        TaskCmd::LinkCommit { id, commit } => cmd_task_link_commit(id, commit),
     }
 }
 
@@ -470,7 +505,7 @@ fn cmd_follow_up(id: i64, title: String, description: Option<String>) -> Result<
         id,
         title,
         description.unwrap_or_default(),
-        "human",
+        actor(),
     )?;
     println!("created follow-up task {} of #{}: {}", t.id, id, t.title);
     Ok(())
@@ -498,7 +533,7 @@ fn cmd_task_edit(id: i64, patch_file: String) -> Result<()> {
     let root = require_project()?;
     let text = read_payload(&patch_file)?;
     let patch = crate::service::parse_task_patch(&text)?;
-    let t = crate::service::patch_task(&root, id, patch, "human")?;
+    let t = crate::service::patch_task(&root, id, patch, actor())?;
     println!("patched task {}", t.id);
     Ok(())
 }
@@ -511,7 +546,7 @@ fn cmd_task_report(id: i64, report_file: String, append: bool) -> Result<()> {
     } else {
         crate::service::ReportMode::Replace
     };
-    let t = crate::service::update_report(&root, id, upd, mode, "human")?;
+    let t = crate::service::update_report(&root, id, upd, mode, actor())?;
     println!(
         "report updated for task {} ({})",
         t.id,
@@ -523,12 +558,20 @@ fn cmd_task_report(id: i64, report_file: String, append: bool) -> Result<()> {
 fn cmd_task_complete(id: i64, report_file: String) -> Result<()> {
     let root = require_project()?;
     let upd = parse_report_payload(&report_file)?;
-    let t = crate::service::complete_task(&root, id, upd, "human")?;
+    let t = crate::service::complete_task(&root, id, upd, actor())?;
     println!(
         "task {} completed (report saved, status: {})",
         t.id,
         t.status.as_str()
     );
+    Ok(())
+}
+
+fn cmd_task_link_commit(id: i64, commit: String) -> Result<()> {
+    let root = require_project()?;
+    let task = crate::service::link_commit(&root, id, &commit, actor())?;
+    let linked = task.links.iter().find(|link| link.starts_with("commit:"));
+    println!("task {id} linked to {}", linked.unwrap_or(&commit));
     Ok(())
 }
 
@@ -541,6 +584,7 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
 fn run_kb(cmd: KbCmd) -> Result<()> {
     match cmd {
         KbCmd::Status => cmd_kb_status(),
+        KbCmd::DraftStatus => cmd_kb_draft_status(),
         KbCmd::List {
             kind,
             tag,
@@ -642,6 +686,10 @@ fn cmd_kb_status() -> Result<()> {
     let root = require_project()?;
     match knowledge::current_status(&root)? {
         Some(cs) => {
+            let fresh = knowledge::summary_freshness(&root, &cs)?;
+            if fresh.possibly_stale {
+                println!("POSSIBLY STALE: review this summary before relying on it (jay kb draft-status).\n");
+            }
             if cs.designated {
                 println!("== current summary (designated) ==");
             } else {
@@ -654,7 +702,6 @@ fn cmd_kb_status() -> Result<()> {
                     println!("recorded commit: {c}");
                 }
             }
-            let fresh = knowledge::summary_freshness(&root, &cs)?;
             if fresh.possibly_stale {
                 println!();
                 println!("freshness (facts, not a verdict on the prose):");
@@ -677,9 +724,45 @@ fn cmd_kb_status() -> Result<()> {
     Ok(())
 }
 
+fn cmd_kb_draft_status() -> Result<()> {
+    let root = require_project()?;
+    let cs = knowledge::current_status(&root)?
+        .context("no status summary exists; add a status entry first")?;
+    let fresh = knowledge::summary_freshness(&root, &cs)?;
+    let all = tasks::load_tasks(&root)?;
+    println!("DRAFT ONLY — review and edit before adding a new status entry.\n");
+    println!("Since status #{} ({}):", cs.entry.id, cs.entry.title);
+    if fresh.tasks_updated_after.is_empty() {
+        println!("- No task records changed.");
+    } else {
+        for id in &fresh.tasks_updated_after {
+            if let Some(task) = all.iter().find(|task| task.id == *id) {
+                println!("- Task #{} [{}]: {}", id, task.status.as_str(), task.title);
+                if let Some(result) = &task.report_result {
+                    println!("  Result: {}", result.trim());
+                }
+            }
+        }
+    }
+    let ready = crate::service::ready_tasks(&root)?;
+    if !ready.is_empty() {
+        println!("\nReady next:");
+        for task in ready {
+            println!("- Task #{}: {}", task.id, task.title);
+        }
+    }
+    if !fresh.facts.is_empty() {
+        println!("\nFreshness facts:");
+        for fact in fresh.facts {
+            println!("- {fact}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_kb_set_current(id: i64, commit: Option<String>) -> Result<()> {
     let root = require_project()?;
-    let cs = knowledge::set_current_summary(&root, id, "human", commit)?;
+    let cs = knowledge::set_current_summary(&root, id, actor(), commit)?;
     println!(
         "current summary: status entry #{} (designated by {} at {})",
         cs.entry_id, cs.set_by, cs.set_at
@@ -755,10 +838,10 @@ fn cmd_kb_add(
     entry.related_task = related_task;
     entry.supersedes = supersedes;
     entry.commit = commit;
-    entry.actor = Some("human".to_string());
+    entry.actor = Some(actor().to_string());
     if k == KnowledgeKind::Status {
         // entry creation + current designation in ONE atomic file update
-        let (saved, cs) = knowledge::add_status_entry(&root, entry, set_current, "human")?;
+        let (saved, cs) = knowledge::add_status_entry(&root, entry, set_current, actor())?;
         println!("added status #{}: {}", saved.id, saved.title);
         if let Some(cs) = cs {
             println!("designated as current summary (at {})", cs.set_at);
@@ -806,7 +889,7 @@ fn cmd_kb_edit(
         if !supersedes.is_empty() {
             entry.supersedes = supersedes;
         }
-        entry.actor = Some("human".to_string());
+        entry.actor = Some(actor().to_string());
     })?;
     println!(
         "updated {} #{}: {}",
@@ -849,7 +932,7 @@ fn apply_action(id: i64, action: TaskAction, block_reason: Option<&str>) -> Resu
         .ok_or_else(|| anyhow::anyhow!("task {id} not found"))?
         .git_diagnostics
         .len();
-    let t = crate::service::apply_action(&root, id, action, "human", block_reason)?;
+    let t = crate::service::apply_action(&root, id, action, actor(), block_reason)?;
     if t.blocked {
         println!(
             "task {} is blocked: {}",
@@ -1116,7 +1199,7 @@ fn cmd_new(
         t.estimate_hours = estimate_hours;
         t.deadline = deadline;
         t.depends_on = depends_on;
-        t.actor = Some("human".to_string());
+        t.actor = Some(actor().to_string());
         t
     })?;
     println!("created task {}: {}", t.id, t.title);
@@ -1202,14 +1285,18 @@ fn status_overview(json: bool) -> Result<()> {
         }
     }
     if let Some(cs) = knowledge::current_status(&root)? {
+        let fresh = knowledge::summary_freshness(&root, &cs)?;
         let label = if cs.designated {
-            "current summary".to_string()
+            if fresh.possibly_stale {
+                "current summary (possibly stale; review with jay kb draft-status)".to_string()
+            } else {
+                "current summary".to_string()
+            }
         } else {
             knowledge::FALLBACK_NOTE.to_string()
         };
         println!("\n{label}:");
         println!("  status #{} {}", cs.entry.id, cs.entry.title);
-        let fresh = knowledge::summary_freshness(&root, &cs)?;
         if fresh.possibly_stale {
             for fact in &fresh.facts {
                 println!("  possibly stale: {fact}");
@@ -1465,7 +1552,7 @@ fn cmd_move(id: i64, to: String) -> Result<()> {
     };
     match project::resolve_context_at(&dest)? {
         JayContext::Project(d) => {
-            let moved = crate::service::move_task(&root, id, &d, "human")?;
+            let moved = crate::service::move_task(&root, id, &d, actor())?;
             println!("moved task {id} -> {} (new id {})", d.display(), moved.id);
         }
         JayContext::Workspace(_) => bail!("destination must be a project folder (with .nest)"),

@@ -50,6 +50,9 @@ Ordered by priority (then id). Alias: `jay task ls`.
     jay next --json
 
 `jay status` is read-only, like `git status`.
+When the designated summary may be stale, it is labeled before its title.
+`jay kb draft-status` prints a reviewable draft from tasks changed since that
+summary; it does not save or designate a new entry.
 
 ## 5. The state machine
 
@@ -66,6 +69,14 @@ validation):
 
 Every transition records a lifecycle event (actor, RFC 3339 timestamp with
 offset, old/new state, reason) in the task's `history`.
+The CLI defaults to `human`. An agent using the CLI should pass a global actor:
+
+    jay --actor agent:codex task start 2
+
+The MCP interface records `agent:<name>` by default. `--actor` accepts only
+`human` or `agent:<name>` and applies to all CLI writes in that invocation.
+For a whole agent session, set `JAY_ACTOR=agent:codex`; an explicit `--actor`
+takes precedence over the environment variable.
 
 ## 6. Reports and atomic completion
 
@@ -84,10 +95,20 @@ Write the five report sections and close in one atomic step (`-` reads stdin):
     jay task complete 2 --report-file report.json
     # task 2 completed (report saved, status: closed)
 
-`complete` requires the task to be in review — review is never silently
-skipped. If validation fails, nothing changes (the file keeps its original
-bytes). problems/ideas/decisions may be empty arrays; result and validation
-must be nonblank.
+With `git_integration = "off"`, `complete` also accepts a started task, so a
+separate review command is unnecessary. It records review and close in one
+atomic local update. With `auto`, review remains required so PR creation is
+not skipped. If validation fails, nothing changes (the file keeps its
+original bytes). problems/ideas/decisions may be empty arrays; result and
+validation must be nonblank.
+
+After a manual Git commit, optionally link its verified local hash:
+
+    jay --actor agent:codex task link-commit 2 HEAD
+
+The link belongs to the current completion cycle and is retained in history
+if the task is reopened. This command does not commit or push; storing the
+reference itself changes the task file and can be committed separately.
 
 To update the report without closing:
 
@@ -201,6 +222,7 @@ dependency or follow-up references would break (remove those edges first).
     jay kb add --kind decision --title "Use TOML" --content "diffable" --tag format
     jay kb add --kind status --title "v1 delivered" --content "..." --set-current --commit $(git rev-parse --short HEAD)
     jay kb status            # the designated summary + provenance + freshness facts
+    jay kb draft-status      # read-only draft from changes after that summary
     jay kb set-current 3     # designate an existing status entry as authoritative
     jay kb list / show / edit / search
 
@@ -266,6 +288,7 @@ init needed.
 | jay task review <id> | — | started -> review |
 | jay task done <id> | — | review -> closed (needs evidence) |
 | jay task complete <id> --report-file <json> | — | report + close atomically |
+| jay task link-commit <id> <ref> | — | link a closed task to a local commit |
 | jay task report <id> --report-file <json> [--append] | — | typed 5-section update |
 | jay task edit <id> --patch-file <json> | — | partial edit |
 | jay task rewind <id> | — | one step back |
@@ -274,7 +297,7 @@ init needed.
 | jay task reopen <id> [--reason] | — | cancelled/closed -> open |
 | jay task follow-up <id> --title <t> | — | linked follow-up task |
 | jay task move <id> --to <dir> | — | move a task (guarded) |
-| jay kb status / set-current / add / list / show / edit / search | — | knowledge base |
+| jay kb status / draft-status / set-current / add / list / show / edit / search | — | knowledge base |
 | jay project list | project ls | list projects (workspace) |
 | jay sync | — | git pull+push |
 

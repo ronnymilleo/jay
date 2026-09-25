@@ -67,6 +67,257 @@ fn walk_to_review(root: &Path, id: i64) {
     service::apply_action(root, id, jay::model::TaskAction::Review, "human", None).unwrap();
 }
 
+#[test]
+fn cli_agent_actor_and_local_completion_are_recorded() {
+    let proj = Proj::new("agent-workflow");
+    let root = proj.root();
+    let task = service::create_task(root, |id| {
+        Task::new(id, "Deliver feature".into(), String::new())
+    })
+    .unwrap();
+    let report_path = root.join("report.json");
+    std::fs::write(
+        &report_path,
+        r#"{"result":"Delivered","validation":"Tests passed"}"#,
+    )
+    .unwrap();
+    let path = report_path.to_str().unwrap();
+
+    let (code, _, stderr) = run_jay(root, &["--actor", "agent:codex", "task", "start", "1"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_jay(
+        root,
+        &[
+            "--actor",
+            "agent:codex",
+            "task",
+            "complete",
+            "1",
+            "--report-file",
+            path,
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let saved = tasks::load_task(root, task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Closed);
+    assert_eq!(saved.actor.as_deref(), Some("agent:codex"));
+    assert_eq!(saved.history.len(), 3);
+    assert_eq!(saved.history[1].to, TaskStatus::Review);
+    assert_eq!(saved.history.first().unwrap().actor, "agent:codex");
+    assert_eq!(saved.history.last().unwrap().actor, "agent:codex");
+
+    let (code, list, stderr) = run_jay(
+        root,
+        &[
+            "--actor",
+            "agent:codex",
+            "task",
+            "list",
+            "--border",
+            "ascii",
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(list.contains("Deliver feature"), "{list}");
+
+    let (code, _, stderr) = run_jay(root, &["--actor", "agent:", "task", "show", "1"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("actor must be"), "{stderr}");
+}
+
+#[test]
+fn cli_actor_flag_overrides_session_environment() {
+    let proj = Proj::new("actor-precedence");
+    let root = proj.root();
+    let output = Command::new(jay_bin())
+        .args(["task", "new", "From environment"])
+        .env("JAY_ACTOR", "agent:session")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        tasks::load_task(root, 1).unwrap().unwrap().actor.as_deref(),
+        Some("agent:session")
+    );
+    let output = Command::new(jay_bin())
+        .args(["--actor", "agent:override", "task", "start", "1"])
+        .env("JAY_ACTOR", "agent:session")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        tasks::load_task(root, 1).unwrap().unwrap().history[0].actor,
+        "agent:override"
+    );
+}
+
+#[test]
+fn completion_rejects_missing_evidence_without_changing_started_task() {
+    let proj = Proj::new("incomplete");
+    let root = proj.root();
+    let task = service::create_task(root, |id| {
+        Task::new(id, "Deliver feature".into(), String::new())
+    })
+    .unwrap();
+    service::apply_action(
+        root,
+        task.id,
+        jay::model::TaskAction::Start,
+        "agent:codex",
+        None,
+    )
+    .unwrap();
+    let before = std::fs::read(tasks::task_file(root, task.id)).unwrap();
+    assert!(service::complete_task(root, task.id, report("", "passed"), "agent:codex").is_err());
+    assert_eq!(
+        std::fs::read(tasks::task_file(root, task.id)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn automatic_git_mode_still_requires_review_before_completion() {
+    let proj = Proj::new("auto-review");
+    let root = proj.root();
+    let task = service::create_task(root, |id| {
+        Task::new(id, "Deliver feature".into(), String::new())
+    })
+    .unwrap();
+    service::apply_action(
+        root,
+        task.id,
+        jay::model::TaskAction::Start,
+        "agent:codex",
+        None,
+    )
+    .unwrap();
+    let mut config = project::load_config(root).unwrap();
+    config.git_integration = Some(GitIntegration::Auto);
+    project::save_config(root, &config).unwrap();
+    let before = std::fs::read(tasks::task_file(root, task.id)).unwrap();
+    assert!(
+        service::complete_task(root, task.id, report("done", "passed"), "agent:codex").is_err()
+    );
+    assert_eq!(
+        std::fs::read(tasks::task_file(root, task.id)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn linked_commit_is_verified_and_visible_after_completion() {
+    let proj = Proj::new("commit-link");
+    let root = proj.root();
+    let task = service::create_task(root, |id| {
+        Task::new(id, "Deliver feature".into(), String::new())
+    })
+    .unwrap();
+    service::apply_action(
+        root,
+        task.id,
+        jay::model::TaskAction::Start,
+        "agent:codex",
+        None,
+    )
+    .unwrap();
+    service::complete_task(root, task.id, report("done", "passed"), "agent:codex").unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "Test"
+    ])
+    .status
+    .success());
+    let (code, _, stderr) = run_jay(
+        root,
+        &["--actor", "agent:codex", "task", "link-commit", "1", "HEAD"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let saved = tasks::load_task(root, task.id).unwrap().unwrap();
+    assert!(saved.links.iter().any(|link| link.starts_with("commit:")));
+    let (code, _, _) = run_jay(root, &["task", "link-commit", "1", "missing-ref"]);
+    assert_eq!(code, 2);
+    service::apply_action(
+        root,
+        task.id,
+        jay::model::TaskAction::Reopen,
+        "agent:codex",
+        Some("follow-up fix"),
+    )
+    .unwrap();
+    let reopened = tasks::load_task(root, task.id).unwrap().unwrap();
+    assert!(!reopened
+        .links
+        .iter()
+        .any(|link| link.starts_with("commit:")));
+    assert!(reopened
+        .history
+        .last()
+        .unwrap()
+        .prior_report
+        .as_ref()
+        .unwrap()
+        .links
+        .iter()
+        .any(|link| link.starts_with("commit:")));
+}
+
+#[test]
+fn stale_status_warns_and_draft_uses_updated_task_reports() {
+    let proj = Proj::new("status-draft");
+    let root = proj.root();
+    let task = service::create_task(root, |id| {
+        Task::new(id, "Deliver feature".into(), String::new())
+    })
+    .unwrap();
+    let entry = KnowledgeEntry::new(
+        0,
+        KnowledgeKind::Status,
+        "Before delivery".into(),
+        "Task is open".into(),
+    );
+    knowledge::add_status_entry(root, entry, true, "agent:codex").unwrap();
+    service::apply_action(
+        root,
+        task.id,
+        jay::model::TaskAction::Start,
+        "agent:codex",
+        None,
+    )
+    .unwrap();
+    service::complete_task(
+        root,
+        task.id,
+        report("Feature delivered", "Tests passed"),
+        "agent:codex",
+    )
+    .unwrap();
+
+    let (code, status, _) = run_jay(root, &["status"]);
+    assert_eq!(code, 0);
+    assert!(status.contains("possibly stale"), "{status}");
+    let (code, draft, _) = run_jay(root, &["kb", "draft-status"]);
+    assert_eq!(code, 0);
+    assert!(draft.contains("DRAFT ONLY"), "{draft}");
+    assert!(draft.contains("Feature delivered"), "{draft}");
+    assert!(draft.contains("Task #1 [closed]"), "{draft}");
+}
+
 // ===== scenario 1: psotool-sized project =====
 
 #[test]
