@@ -4,6 +4,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use comfy_table::{presets, Cell, CellAlignment, Color, ContentArrangement, Table};
 
@@ -67,7 +68,6 @@ fn validate_actor(value: &str) -> Result<()> {
     name = "jay",
     about = "Terminal project manager (git-like: one .nest per folder)"
 )]
-
 #[command(version)]
 struct Cli {
     /// Actor recorded for CLI writes (overrides JAY_ACTOR; default: human).
@@ -584,6 +584,7 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
 fn run_kb(cmd: KbCmd) -> Result<()> {
     match cmd {
         KbCmd::Status => cmd_kb_status(),
+        KbCmd::DraftStatus => cmd_kb_draft_status(),
         KbCmd::List {
             kind,
             tag,

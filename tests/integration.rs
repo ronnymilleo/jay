@@ -106,6 +106,20 @@ fn cli_agent_actor_and_local_completion_are_recorded() {
     assert_eq!(saved.history.first().unwrap().actor, "agent:codex");
     assert_eq!(saved.history.last().unwrap().actor, "agent:codex");
 
+    let (code, list, stderr) = run_jay(
+        root,
+        &[
+            "--actor",
+            "agent:codex",
+            "task",
+            "list",
+            "--border",
+            "ascii",
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(list.contains("Deliver feature"), "{list}");
+
     let (code, _, stderr) = run_jay(root, &["--actor", "agent:", "task", "show", "1"]);
     assert_eq!(code, 2);
     assert!(stderr.contains("actor must be"), "{stderr}");
