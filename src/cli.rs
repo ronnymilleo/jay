@@ -1,10 +1,9 @@
 //! Quick terminal commands over the resolved project context.
 
 use anyhow::{bail, Context as _, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 
 use comfy_table::{presets, Cell, CellAlignment, Color, ContentArrangement, Table};
 
@@ -15,8 +14,9 @@ use crate::tasks;
 
 /// Global `--no-color` flag (set once at startup; a single-shot CLI).
 static NO_COLOR: AtomicBool = AtomicBool::new(false);
+static ACTOR: OnceLock<String> = OnceLock::new();
 
-/// Table border style for list/find commands.
+/// Table border style.
 #[derive(Clone, Copy, ValueEnum)]
 enum BorderStyle {
     /// No lines (default).
@@ -43,10 +43,6 @@ impl BorderStyle {
     }
 }
 
-/// Global `--borders` style (set once at startup).
-static BORDER_STYLE: OnceLock<BorderStyle> = OnceLock::new();
-static ACTOR: OnceLock<String> = OnceLock::new();
-
 fn actor() -> &'static str {
     ACTOR.get().map(String::as_str).unwrap_or("human")
 }
@@ -66,19 +62,12 @@ fn validate_actor(value: &str) -> Result<()> {
     }
 }
 
-fn border_preset() -> &'static str {
-    BORDER_STYLE
-        .get()
-        .copied()
-        .unwrap_or(BorderStyle::None)
-        .preset()
-}
-
 #[derive(Parser)]
 #[command(
     name = "jay",
     about = "Terminal project manager (git-like: one .nest per folder)"
 )]
+
 #[command(version)]
 struct Cli {
     /// Actor recorded for CLI writes (overrides JAY_ACTOR; default: human).
@@ -88,12 +77,16 @@ struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
 
-    /// Table border style for list/find output.
-    #[arg(long, global = true, value_enum, default_value_t = BorderStyle::None)]
-    borders: BorderStyle,
-
     #[command(subcommand)]
     command: Command,
+}
+
+/// Arguments to improve listing readability
+#[derive(Args)]
+struct TableArgs {
+    /// Table border style for list/find output.
+    #[arg(long, global = true, value_enum, default_value_t = BorderStyle::None)]
+    border: BorderStyle,
 }
 
 #[derive(Subcommand)]
@@ -148,6 +141,8 @@ enum Command {
     Next {
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
     /// Task operations (new, start, review, done, ...).
     Task {
@@ -192,6 +187,8 @@ enum TaskCmd {
     List {
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
     /// Show a task's full detail.
     Show { id: i64 },
@@ -204,6 +201,8 @@ enum TaskCmd {
         label: Option<String>,
         #[arg(long)]
         status: Option<String>,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
     /// Start a task (open -> started; creates a branch only with git_integration=auto).
     #[command(alias = "do")]
@@ -293,6 +292,8 @@ enum ProjectCmd {
     List {
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
 }
 
@@ -314,6 +315,8 @@ enum KbCmd {
         tag: Option<String>,
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
     /// Show a single knowledge base entry.
     Show {
@@ -395,6 +398,8 @@ enum KbCmd {
         limit: Option<usize>,
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
     },
 }
 
@@ -411,7 +416,6 @@ pub fn run() -> Result<i32> {
     validate_actor(&selected_actor)?;
     let _ = ACTOR.set(selected_actor);
     NO_COLOR.store(cli.no_color, Ordering::Relaxed);
-    let _ = BORDER_STYLE.set(cli.borders);
     match cli.command {
         Command::Init { name } => {
             let cwd = std::env::current_dir()?;
@@ -425,7 +429,7 @@ pub fn run() -> Result<i32> {
             show_origin,
         } => cmd_config(field, value, show_origin)?,
         Command::Status { json } => status_overview(json)?,
-        Command::Next { json } => cmd_next(json)?,
+        Command::Next { json, table_args } => cmd_next(json, table_args)?,
         Command::Sync => cmd_sync()?,
         Command::Doctor { json } => return cmd_doctor(json),
         Command::Repair { apply } => cmd_repair(apply)?,
@@ -457,9 +461,9 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             deadline,
             depends_on,
         ),
-        TaskCmd::List { json } => {
+        TaskCmd::List { json, table_args } => {
             let root = require_project()?;
-            ls_tasks(&root, json)
+            ls_tasks(&root, json, table_args)
         }
         TaskCmd::Show { id } => cmd_show(id),
         TaskCmd::Find {
@@ -467,7 +471,8 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             priority,
             label,
             status,
-        } => cmd_find(term, priority, label, status),
+            table_args,
+        } => cmd_find(term, priority, label, status, table_args),
         TaskCmd::Start { id } => apply_action(id, TaskAction::Start, None),
         TaskCmd::Review { id } => apply_action(id, TaskAction::Review, None),
         TaskCmd::Done { id } => apply_action(id, TaskAction::Done, None),
@@ -572,15 +577,19 @@ fn cmd_task_link_commit(id: i64, commit: String) -> Result<()> {
 
 fn run_project(cmd: ProjectCmd) -> Result<()> {
     match cmd {
-        ProjectCmd::List { json } => cmd_project_list(json),
+        ProjectCmd::List { json, table_args } => cmd_project_list(json, table_args),
     }
 }
 
 fn run_kb(cmd: KbCmd) -> Result<()> {
     match cmd {
         KbCmd::Status => cmd_kb_status(),
-        KbCmd::DraftStatus => cmd_kb_draft_status(),
-        KbCmd::List { kind, tag, json } => cmd_kb_list(kind, tag, json),
+        KbCmd::List {
+            kind,
+            tag,
+            json,
+            table_args,
+        } => cmd_kb_list(kind, tag, json, table_args),
         KbCmd::Show { id, kind } => cmd_kb_show(id, kind),
         KbCmd::Add {
             kind,
@@ -616,7 +625,8 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
             kind,
             limit,
             json,
-        } => cmd_kb_search(query, kind, limit, json),
+            table_args,
+        } => cmd_kb_search(query, kind, limit, json, table_args),
     }
 }
 
@@ -625,6 +635,7 @@ fn cmd_kb_search(
     kind: Option<String>,
     limit: Option<usize>,
     json: bool,
+    table_args: TableArgs,
 ) -> Result<()> {
     let root = require_project()?;
     let k = match kind.as_deref() {
@@ -652,7 +663,7 @@ fn cmd_kb_search(
     let mut table = Table::new();
     table
         .set_header(vec!["Score", "Kind", "Title", "Tags"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for r in results.iter().take(limit) {
         table.add_row(vec![
@@ -758,7 +769,12 @@ fn cmd_kb_set_current(id: i64, commit: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_kb_list(kind: Option<String>, tag: Option<String>, json: bool) -> Result<()> {
+fn cmd_kb_list(
+    kind: Option<String>,
+    tag: Option<String>,
+    json: bool,
+    table_args: TableArgs,
+) -> Result<()> {
     let root = require_project()?;
     let k = match kind.as_deref() {
         Some(s) => Some(s.parse::<KnowledgeKind>()?),
@@ -776,7 +792,7 @@ fn cmd_kb_list(kind: Option<String>, tag: Option<String>, json: bool) -> Result<
     let mut table = Table::new();
     table
         .set_header(vec!["ID", "Kind", "Title", "Tags"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for e in &entries {
         table.add_row(vec![
@@ -900,12 +916,12 @@ fn print_kb_entry(e: &KnowledgeEntry) {
     println!("{}", e.content);
 }
 
-fn cmd_project_list(json: bool) -> Result<()> {
+fn cmd_project_list(json: bool, table_args: TableArgs) -> Result<()> {
     let ws = match project::resolve_context()? {
         JayContext::Workspace(root) => root,
         JayContext::Project(root) => root.parent().map(|p| p.to_path_buf()).unwrap_or(root),
     };
-    ls_projects(&ws, json)
+    ls_projects(&ws, json, table_args)
 }
 
 /// Applies a state-machine action to a task (the CLI side).
@@ -1071,7 +1087,7 @@ fn config_origins(root: &std::path::Path, cfg: &ProjectConfig) -> Vec<(String, S
         .collect()
 }
 
-fn ls_tasks(root: &std::path::Path, json: bool) -> Result<()> {
+fn ls_tasks(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result<()> {
     let mut tasks = tasks::load_tasks(root)?;
     tasks.sort_by(|a, b| {
         a.priority
@@ -1089,7 +1105,7 @@ fn ls_tasks(root: &std::path::Path, json: bool) -> Result<()> {
     let mut table = Table::new();
     table
         .set_header(vec!["ID", "Status", "Title"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for t in tasks {
         table.add_row(vec![
@@ -1106,7 +1122,7 @@ fn ls_tasks(root: &std::path::Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn ls_projects(root: &std::path::Path, json: bool) -> Result<()> {
+fn ls_projects(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result<()> {
     let subs = project::project_subfolders(root);
     if json {
         let mut rows = Vec::new();
@@ -1130,7 +1146,7 @@ fn ls_projects(root: &std::path::Path, json: bool) -> Result<()> {
     let mut table = Table::new();
     table
         .set_header(vec!["Project", "Tasks", "Active"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for sub in &subs {
         let cfg = project::load_config(sub)?;
@@ -1189,7 +1205,7 @@ fn cmd_new(
     Ok(())
 }
 
-fn cmd_next(json: bool) -> Result<()> {
+fn cmd_next(json: bool, table_args: TableArgs) -> Result<()> {
     let root = require_project()?;
     let ready = crate::service::ready_tasks(&root)?;
     if json {
@@ -1203,7 +1219,7 @@ fn cmd_next(json: bool) -> Result<()> {
     let mut table = Table::new();
     table
         .set_header(vec!["ID", "Priority", "Title"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for t in &ready {
         table.add_row(vec![
@@ -1461,6 +1477,7 @@ fn cmd_find(
     priority: Option<String>,
     label: Option<String>,
     status: Option<String>,
+    table_args: TableArgs,
 ) -> Result<()> {
     let root = require_project()?;
     let tasks = tasks::load_tasks(&root)?;
@@ -1469,7 +1486,7 @@ fn cmd_find(
     let mut table = Table::new();
     table
         .set_header(vec!["ID", "Status", "Title"])
-        .load_preset(border_preset())
+        .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     let mut found = 0;
     for t in tasks {
