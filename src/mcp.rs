@@ -56,6 +56,15 @@ struct ListProjectsArgs {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ListTasksArgs {
+    #[serde(default)]
+    dir: Option<String>,
+    /// Sort order: priority (default), id, or status.
+    #[serde(default)]
+    sort: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct UpdateConfigArgs {
     field: String,
     value: String,
@@ -504,7 +513,7 @@ impl Jay {
     }
 
     #[tool(
-        description = "List projects in a workspace folder. Args: dir (optional, defaults to cwd)"
+        description = "List projects in a workspace folder, ordered by name. Args: dir (optional, defaults to cwd)"
     )]
     async fn list_projects(
         &self,
@@ -521,11 +530,10 @@ impl Jay {
             }
             None => self.root.clone(),
         };
-        let subs = project::project_subfolders(&dir);
+        let projects = project::workspace_projects(&dir)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let mut rows = Vec::new();
-        for sub in subs {
-            let cfg = project::load_config(&sub)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        for (sub, cfg) in projects {
             let mut counts = serde_json::Map::new();
             for t in tasks::load_tasks(&sub)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -593,21 +601,22 @@ impl Jay {
     // ===== task tools =====
 
     #[tool(
-        description = "List tasks in the current project (priority order). Args: dir (optional)"
+        description = "List tasks in the current project. Args: sort (priority|id|status, optional, default priority; ties break by id), dir (optional)"
     )]
     async fn list_tasks(
         &self,
-        Parameters(args): Parameters<ListProjectsArgs>,
+        Parameters(args): Parameters<ListTasksArgs>,
     ) -> Result<CallToolResult, McpError> {
         let root = self.target_root(args.dir.as_deref())?;
+        let sort = match args.sort.as_deref() {
+            Some(s) => s
+                .parse::<tasks::TaskSort>()
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+            None => tasks::TaskSort::Priority,
+        };
         let mut tasks =
             tasks::load_tasks(&root).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        tasks.sort_by(|a, b| {
-            a.priority
-                .rank()
-                .cmp(&b.priority.rank())
-                .then(a.id.cmp(&b.id))
-        });
+        tasks::sort_tasks(&mut tasks, sort);
         Self::result_json(&tasks)
     }
 

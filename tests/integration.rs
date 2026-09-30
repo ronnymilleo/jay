@@ -724,6 +724,38 @@ fn warnings_alone_do_not_fail_doctor() {
     assert!(out.contains("warning"), "{out}");
 }
 
+#[test]
+fn task_list_sorts_by_id_and_shows_priority() {
+    use jay::model::Priority;
+    let proj = Proj::new("sorting");
+    let r = proj.root();
+    for (id, p) in [
+        (1, Priority::Low),
+        (2, Priority::Highest),
+        (3, Priority::Medium),
+    ] {
+        let mut t = Task::new(id, format!("task {id}"), String::new());
+        t.priority = p;
+        tasks::save_task(r, &t).unwrap();
+    }
+    let first_col = |out: &str| -> Vec<String> {
+        out.lines()
+            .skip(1)
+            .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+            .collect()
+    };
+    let (code, out, err) = run_jay(r, &["--no-color", "task", "list"]);
+    assert_eq!(code, 0, "{err}");
+    let header: Vec<&str> = out.lines().next().unwrap().split_whitespace().collect();
+    assert_eq!(header, vec!["ID", "Priority", "Status", "Title"]);
+    assert_eq!(first_col(&out), vec!["1", "2", "3"]);
+    assert!(out.contains("highest"), "{out}");
+    let (_, out, _) = run_jay(r, &["--no-color", "task", "list", "--sort", "priority"]);
+    assert_eq!(first_col(&out), vec!["2", "3", "1"]);
+    let (code, _, _) = run_jay(r, &["task", "list", "--sort", "bogus"]);
+    assert_ne!(code, 0);
+}
+
 // ===== scenario 4: CLI/MCP parity =====
 
 struct McpChild {

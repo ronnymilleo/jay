@@ -154,6 +154,22 @@ pub fn project_subfolders(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Projects under a workspace with their configs, ordered by the displayed
+/// name (case-insensitive), then by path.
+pub fn workspace_projects(dir: &Path) -> Result<Vec<(PathBuf, ProjectConfig)>> {
+    let mut out = project_subfolders(dir)
+        .into_iter()
+        .map(|p| load_config(&p).map(|cfg| (p, cfg)))
+        .collect::<Result<Vec<_>>>()?;
+    out.sort_by(|(pa, a), (pb, b)| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| pa.cmp(pb))
+    });
+    Ok(out)
+}
+
 /// `jay init [name]` — creates `.nest/` (config + tasks + milestones).
 pub fn init_project(dir: &Path, name: Option<&str>) -> Result<()> {
     let pro = dir.join(NEST_DIR);
@@ -287,6 +303,22 @@ mod tests {
         assert_eq!(ctx, Context::Workspace(base.path().to_path_buf()));
         let subs = project_subfolders(base.path());
         assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn workspace_projects_sorted_by_name() {
+        let base = tmpdir();
+        for (dir, name) in [("a", "zeta"), ("b", "Alpha"), ("c", "beta")] {
+            let p = base.path().join(dir);
+            fs::create_dir_all(&p).unwrap();
+            init_project(&p, Some(name)).unwrap();
+        }
+        let names: Vec<String> = workspace_projects(base.path())
+            .unwrap()
+            .into_iter()
+            .map(|(_, cfg)| cfg.name)
+            .collect();
+        assert_eq!(names, vec!["Alpha", "beta", "zeta"]);
     }
 
     #[test]
