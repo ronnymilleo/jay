@@ -37,10 +37,13 @@ only required to *close* a task.
 ## 3. List tasks
 
     jay task list
-    # 1   open        Write the landing page
-    # 2   open        Fix the checkout crash
+    # ID  Priority  Status  Title
+    #  1  medium    open    Write the landing page
+    #  2  high      open    Fix the checkout crash
 
-Ordered by priority (then id). Alias: `jay task ls`.
+Ordered by id by default. `--sort priority` orders by priority (most urgent
+first) and `--sort status` by lifecycle (open, started, review, closed,
+cancelled); ties always break by id. Alias: `jay task ls`.
 
 ## 4. Status overview and ready work
 
@@ -264,7 +267,7 @@ file back over the repaired one.
     mkdir work && cd work
     mkdir proj-a && cd proj-a && jay init && cd ..
     mkdir proj-b && cd proj-b && jay init && cd ..
-    jay project list   # lists proj-a and proj-b with task counts
+    jay project list   # lists proj-a and proj-b (by name) with task counts
 
 A workspace is just a folder whose subfolders are projects — no marker or
 init needed.
@@ -281,7 +284,7 @@ init needed.
 | jay doctor [--json] | — | validate (exit 0/1/2) |
 | jay repair [--apply] | — | explicit safe repairs (backups on apply) |
 | jay task new <title> [flags] | — | create a task (--depends-on repeatable) |
-| jay task list | task ls | list tasks |
+| jay task list [--sort id\|priority\|status] | task ls | list tasks (id order by default) |
 | jay task show <id> | — | full detail + history |
 | jay task find <term> [flags] | — | fuzzy search + filters |
 | jay task start <id> | task do | open -> started (deps must be closed) |

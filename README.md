@@ -105,7 +105,7 @@ Common commands:
     jay mcp                    # MCP server over stdio (for agents)
 
     jay task new <title> [--priority ...] [--label ...] [--estimate-points ...] [--depends-on <id>...]
-    jay task list              # list tasks (alias: ls)
+    jay task list [--sort id|priority|status]  # list tasks by id (alias: ls)
     jay task show <id>         # full detail + report + dependencies + history
     jay task find <term> [--priority ...] [--label ...] [--status ...]
     jay task start <id>        # open -> started (alias: do; refused while deps unmet)
@@ -121,7 +121,7 @@ Common commands:
     jay task follow-up <id> --title <t> [--description <d>]  # linked follow-up task
     jay task move <id> --to <dir>
 
-    jay project list           # list projects in a workspace (alias: ls)
+    jay project list           # list projects in a workspace, by name (alias: ls)
 
     jay kb status              # current summary + provenance + freshness facts
     jay kb set-current <id> [--commit <ref>]      # designate the authoritative summary

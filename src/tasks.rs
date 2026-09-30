@@ -34,6 +34,40 @@ pub fn load_tasks(root: &Path) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
+/// Sort key for task listings (CLI and MCP share it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskSort {
+    /// Ascending id (the file order).
+    #[default]
+    Id,
+    /// Priority rank (most urgent first), then id.
+    Priority,
+    /// Lifecycle order (open -> started -> review -> closed -> cancelled), then id.
+    Status,
+}
+
+impl std::str::FromStr for TaskSort {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "id" => Ok(TaskSort::Id),
+            "priority" => Ok(TaskSort::Priority),
+            "status" => Ok(TaskSort::Status),
+            other => anyhow::bail!("unknown sort: {other} (use id|priority|status)"),
+        }
+    }
+}
+
+/// Sorts tasks in place by the given key; ties always break by id.
+pub fn sort_tasks(tasks: &mut [Task], by: TaskSort) {
+    match by {
+        TaskSort::Id => tasks.sort_by_key(|t| t.id),
+        TaskSort::Priority => tasks.sort_by_key(|t| (t.priority.rank(), t.id)),
+        TaskSort::Status => tasks.sort_by_key(|t| (t.status, t.id)),
+    }
+}
+
 /// Loads a single task by id.
 pub fn load_task(root: &Path, id: i64) -> Result<Option<Task>> {
     let path = task_file(root, id);
@@ -135,6 +169,32 @@ mod tests {
         assert_eq!(next_id(r).unwrap(), 6);
         delete_task(r, 1).unwrap();
         assert!(load_task(r, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn sort_tasks_by_each_key() {
+        use crate::model::Priority;
+        let mk = |id: i64, p: Priority, s: TaskStatus| {
+            let mut t = Task::new(id, format!("t{id}"), String::new());
+            t.priority = p;
+            t.status = s;
+            t
+        };
+        let mut ts = vec![
+            mk(3, Priority::Low, TaskStatus::Open),
+            mk(1, Priority::Medium, TaskStatus::Closed),
+            mk(4, Priority::Highest, TaskStatus::Closed),
+            mk(2, Priority::Highest, TaskStatus::Started),
+        ];
+        let ids = |ts: &[Task]| ts.iter().map(|t| t.id).collect::<Vec<_>>();
+        sort_tasks(&mut ts, TaskSort::Priority);
+        assert_eq!(ids(&ts), vec![2, 4, 1, 3]);
+        sort_tasks(&mut ts, TaskSort::Status);
+        assert_eq!(ids(&ts), vec![3, 2, 1, 4]);
+        sort_tasks(&mut ts, TaskSort::Id);
+        assert_eq!(ids(&ts), vec![1, 2, 3, 4]);
+        assert_eq!("priority".parse::<TaskSort>().unwrap(), TaskSort::Priority);
+        assert!("bogus".parse::<TaskSort>().is_err());
     }
 
     #[test]

@@ -63,6 +63,27 @@ fn validate_actor(value: &str) -> Result<()> {
     }
 }
 
+/// Sort key for `task list`.
+#[derive(Clone, Copy, ValueEnum)]
+enum SortKey {
+    /// Ascending id (default).
+    Id,
+    /// Priority (most urgent first), then id.
+    Priority,
+    /// Lifecycle order (open, started, review, closed, cancelled), then id.
+    Status,
+}
+
+impl From<SortKey> for tasks::TaskSort {
+    fn from(k: SortKey) -> Self {
+        match k {
+            SortKey::Id => tasks::TaskSort::Id,
+            SortKey::Priority => tasks::TaskSort::Priority,
+            SortKey::Status => tasks::TaskSort::Status,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "jay",
@@ -185,6 +206,9 @@ enum TaskCmd {
     /// List tasks.
     #[command(alias = "ls")]
     List {
+        /// Sort order.
+        #[arg(long, value_enum, default_value_t = SortKey::Id)]
+        sort: SortKey,
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -461,9 +485,13 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             deadline,
             depends_on,
         ),
-        TaskCmd::List { json, table_args } => {
+        TaskCmd::List {
+            sort,
+            json,
+            table_args,
+        } => {
             let root = require_project()?;
-            ls_tasks(&root, json, table_args)
+            ls_tasks(&root, sort.into(), json, table_args)
         }
         TaskCmd::Show { id } => cmd_show(id),
         TaskCmd::Find {
@@ -1088,14 +1116,14 @@ fn config_origins(root: &std::path::Path, cfg: &ProjectConfig) -> Vec<(String, S
         .collect()
 }
 
-fn ls_tasks(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result<()> {
+fn ls_tasks(
+    root: &std::path::Path,
+    sort: tasks::TaskSort,
+    json: bool,
+    table_args: TableArgs,
+) -> Result<()> {
     let mut tasks = tasks::load_tasks(root)?;
-    tasks.sort_by(|a, b| {
-        a.priority
-            .rank()
-            .cmp(&b.priority.rank())
-            .then(a.id.cmp(&b.id))
-    });
+    tasks::sort_tasks(&mut tasks, sort);
     if json {
         println!("{}", serde_json::to_string_pretty(&tasks)?);
         return Ok(());
@@ -1105,12 +1133,13 @@ fn ls_tasks(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result
     }
     let mut table = Table::new();
     table
-        .set_header(vec!["ID", "Status", "Title"])
+        .set_header(vec!["ID", "Priority", "Status", "Title"])
         .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     for t in tasks {
         table.add_row(vec![
             Cell::new(t.id.to_string()),
+            Cell::new(t.priority.as_str()),
             status_cell(t.status),
             Cell::new(t.title.clone()),
         ]);
@@ -1124,11 +1153,10 @@ fn ls_tasks(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result
 }
 
 fn ls_projects(root: &std::path::Path, json: bool, table_args: TableArgs) -> Result<()> {
-    let subs = project::project_subfolders(root);
+    let projects = project::workspace_projects(root)?;
     if json {
         let mut rows = Vec::new();
-        for sub in &subs {
-            let cfg = project::load_config(sub)?;
+        for (sub, cfg) in &projects {
             let counts = status_counts(sub)?;
             let mut map = serde_json::Map::new();
             for (s, c) in &counts {
@@ -1149,9 +1177,8 @@ fn ls_projects(root: &std::path::Path, json: bool, table_args: TableArgs) -> Res
         .set_header(vec!["Project", "Tasks", "Active"])
         .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
-    for sub in &subs {
-        let cfg = project::load_config(sub)?;
-        let counts = status_counts(sub)?;
+    for (sub, cfg) in projects {
+        let counts = status_counts(&sub)?;
         let total: usize = counts.values().sum();
         let active = counts.get(&TaskStatus::Started).copied().unwrap_or(0);
         table.add_row(vec![cfg.name, total.to_string(), active.to_string()]);
@@ -1486,7 +1513,7 @@ fn cmd_find(
     let st: Option<TaskStatus> = status.map(|s| s.parse()).transpose()?;
     let mut table = Table::new();
     table
-        .set_header(vec!["ID", "Status", "Title"])
+        .set_header(vec!["ID", "Priority", "Status", "Title"])
         .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
     let mut found = 0;
@@ -1511,6 +1538,7 @@ fn cmd_find(
         }
         table.add_row(vec![
             Cell::new(t.id.to_string()),
+            Cell::new(t.priority.as_str()),
             status_cell(t.status),
             Cell::new(t.title.clone()),
         ]);
