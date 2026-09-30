@@ -62,9 +62,10 @@ git integration (`off` by default; `auto` records structured diagnostics),
 structured dependencies, current-summary designation with freshness facts,
 reopen-with-history and follow-ups. The interface is CLI and MCP; no TUI is included.
 
-Version 0.2.0 adds explicit CLI actor attribution and streamlines local task
-completion and status review. Continue recording compatibility findings before
-releasing 1.0.0.
+Version 0.3.0 makes list output predictable: `task list` orders by id by
+default (with `--sort id|priority|status`), task tables show a Priority
+column, and project lists order by name. Continue recording compatibility
+findings before releasing 1.0.0.
 
 ## Structure
 
