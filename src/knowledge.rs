@@ -36,7 +36,7 @@ pub struct CurrentSummary {
     pub entry_id: i64,
     /// RFC 3339 (with offset) designation time.
     pub set_at: String,
-    /// Who designated it ("human" or "agent:<name>").
+    /// Who designated it ("human" or `agent:<name>`).
     pub set_by: String,
     /// Optional Git commit the summary claims to describe.
     #[serde(default)]

@@ -1,10 +1,21 @@
 [package]
-name = "jay"
+name = "jay-task"
 version = "0.3.1"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
 description = "Local project manager with a CLI, plain-text tasks, and MCP integration"
+repository = "https://github.com/ronnymilleo/jay"
+readme = "README.md"
+keywords = ["project-management", "tasks", "mcp", "cli", "plain-text"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "jay"
+
+[[bin]]
+name = "jay"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

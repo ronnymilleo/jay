@@ -297,7 +297,7 @@ pub struct Task {
     /// Does not imply a dependency unless one is requested separately.
     #[serde(default)]
     pub follow_up_of: Option<i64>,
-    /// Last writer: "human" or "agent:<name>" (CLI or MCP).
+    /// Last writer: "human" or `agent:<name>` (CLI or MCP).
     pub actor: Option<String>,
     /// Last change timestamp.
     pub updated_at: String,
