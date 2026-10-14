@@ -890,6 +890,16 @@ fn mcp_schemas_expose_new_operations() {
         !props.is_null(),
         "patch_task schema must expose a patch argument: {patch}"
     );
+    // issue #5: tolerant list deserialization must not change the announced
+    // schema (clients still see plain arrays)
+    let complete = tools.iter().find(|t| t["name"] == "complete_task").unwrap();
+    let decisions = &complete["inputSchema"]["properties"]["decisions"];
+    assert_eq!(
+        decisions["type"],
+        serde_json::json!(["array", "null"]),
+        "complete_task decisions must stay an array-or-null schema: {complete}"
+    );
+    assert_eq!(decisions["items"]["type"], "string");
 }
 
 #[test]
@@ -1016,4 +1026,74 @@ fn cli_mcp_parity_edit_report_complete_ready_context_reopen() {
     let all = tasks::load_tasks(r).unwrap();
     let fus: Vec<_> = all.iter().filter(|t| t.follow_up_of == Some(2)).collect();
     assert_eq!(fus.len(), 2);
+}
+
+#[test]
+fn mcp_stringified_list_arguments_are_tolerated() {
+    let proj = Proj::new("stringified-lists");
+    let r = proj.root();
+    let mut mcp = McpChild::start(r);
+    let encoded = |v: serde_json::Value| serde_json::to_string(&v).unwrap();
+
+    // create_task: list arguments arrive as JSON-encoded strings
+    let t = mcp.call(
+        "create_task",
+        serde_json::json!({"title": "Issue five", "labels": encoded(serde_json::json!(["a", "b"]))}),
+    );
+    assert_eq!(t["labels"], serde_json::json!(["a", "b"]));
+
+    // patch_task: the patch object itself arrives as a JSON-encoded string
+    let patched = mcp.call(
+        "patch_task",
+        serde_json::json!({"id": 1, "patch": encoded(serde_json::json!({"description": "patched"}))}),
+    );
+    assert_eq!(patched["description"], "patched");
+
+    // add_kb: tags arrive as a JSON-encoded string
+    let entry = mcp.call(
+        "add_kb",
+        serde_json::json!({"kind": "note", "title": "N1", "content": "c", "tags": encoded(serde_json::json!(["x"]))}),
+    );
+    assert_eq!(entry["tags"], serde_json::json!(["x"]));
+
+    // issue #5 reproduction: update_report where the last list argument
+    // (ideas, with decisions absent) is stringified, earlier ones native
+    mcp.call(
+        "update_task_status",
+        serde_json::json!({"id": 1, "action": "start"}),
+    );
+    mcp.call(
+        "update_task_status",
+        serde_json::json!({"id": 1, "action": "review"}),
+    );
+    let rep = mcp.call(
+        "update_report",
+        serde_json::json!({
+            "id": 1,
+            "mode": "replace",
+            "result": "did the work",
+            "validation": "ran the checks",
+            "problems": ["p1"],
+            "ideas": encoded(serde_json::json!(["i1", "i2"])),
+        }),
+    );
+    assert_eq!(rep["report_result"], "did the work");
+    assert_eq!(rep["report_problems"], serde_json::json!(["p1"]));
+    assert_eq!(rep["report_ideas"], serde_json::json!(["i1", "i2"]));
+
+    // complete_task: decisions (last list argument) arrives stringified
+    let done = mcp.call(
+        "complete_task",
+        serde_json::json!({
+            "id": 1,
+            "result": "final",
+            "validation": "v",
+            "problems": ["p"],
+            "ideas": ["i"],
+            "decisions": encoded(serde_json::json!(["d1", "d2"])),
+        }),
+    );
+    assert_eq!(done["status"], "closed");
+    let t = tasks::load_task(r, 1).unwrap().unwrap();
+    assert_eq!(t.report_decisions, vec!["d1".to_string(), "d2".to_string()]);
 }

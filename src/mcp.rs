@@ -28,6 +28,72 @@ fn parse_priority(s: Option<&str>) -> Result<Priority, McpError> {
     }
 }
 
+// ===== tolerant list argument deserialization =====
+//
+// Some MCP clients stringify the last list argument of a tool call, so it
+// arrives as a JSON-encoded string (e.g. "[\"a\", \"b\"]") instead of a
+// native array (issue #5). List arguments therefore accept a native JSON
+// array, a JSON-encoded array string, or an empty string; `null` is treated
+// as an absent value. The announced JSON schema still describes a plain
+// array (schemars ignores `deserialize_with`).
+
+/// Core list parser shared by the field-level deserializers below.
+fn flexible_list<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+) -> Result<Vec<T>, String> {
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::String(s) => {
+            let text = s.trim();
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            serde_json::from_str(text).map_err(|e| {
+                format!("expected a JSON array or a JSON-encoded array string, got {text:?}: {e}")
+            })
+        }
+        other => serde_json::from_value(other).map_err(|e| e.to_string()),
+    }
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    flexible_list(serde::Deserialize::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_opt_string_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde::Deserialize::deserialize(deserializer)? {
+        Some(value) => flexible_list(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+fn deserialize_i64_list<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    flexible_list(serde::Deserialize::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_opt_i64_list<'de, D>(deserializer: D) -> Result<Option<Vec<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde::Deserialize::deserialize(deserializer)? {
+        Some(value) => flexible_list(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 /// MCP service. The current project is resolved from the process cwd.
 #[derive(Clone)]
 pub struct Jay {
@@ -45,7 +111,7 @@ struct InitProjectArgs {
     goal: Option<String>,
     git_repo: Option<String>,
     branch_template: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     links: Vec<String>,
 }
 
@@ -76,14 +142,14 @@ struct CreateTaskArgs {
     #[serde(default)]
     description: String,
     priority: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     labels: Vec<String>,
     estimate_points: Option<i64>,
     estimate_hours: Option<f64>,
     deadline: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     links: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     acceptance: Vec<String>,
     #[serde(default)]
     context: String,
@@ -93,7 +159,7 @@ struct CreateTaskArgs {
     milestone_id: Option<i64>,
     /// Task ids this task depends on (project-local; validated: no
     /// duplicates, missing ids, self-dependency or cycles).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_i64_list")]
     depends_on: Vec<i64>,
     #[serde(default)]
     dir: Option<String>,
@@ -112,18 +178,18 @@ struct UpdateTaskArgs {
     title: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     acceptance: Vec<String>,
     #[serde(default)]
     context: String,
     assignee: Option<String>,
     priority: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     labels: Vec<String>,
     estimate_points: Option<i64>,
     estimate_hours: Option<f64>,
     deadline: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     links: Vec<String>,
     parent_id: Option<i64>,
     epic_id: Option<i64>,
@@ -215,11 +281,11 @@ struct UpdateReportArgs {
     result: Option<String>,
     #[serde(default)]
     validation: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     problems: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     ideas: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     decisions: Option<Vec<String>>,
     #[serde(default)]
     actor: Option<String>,
@@ -234,11 +300,11 @@ struct CompleteTaskArgs {
     result: Option<String>,
     #[serde(default)]
     validation: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     problems: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     ideas: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     decisions: Option<Vec<String>>,
     #[serde(default)]
     actor: Option<String>,
@@ -279,12 +345,12 @@ struct AddKbArgs {
     kind: String,
     title: String,
     content: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     tags: Vec<String>,
     #[serde(default)]
     related_task: Option<i64>,
     /// Status entries: ids this entry supersedes (validated; text preserved).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_i64_list")]
     supersedes: Vec<i64>,
     /// Optional git commit reference recorded with the entry.
     #[serde(default)]
@@ -319,12 +385,12 @@ struct UpdateKbArgs {
     title: Option<String>,
     #[serde(default)]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_list")]
     tags: Option<Vec<String>>,
     #[serde(default)]
     related_task: Option<i64>,
     /// Replace supersession references (validated: existing targets, no cycles).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_i64_list")]
     supersedes: Option<Vec<i64>>,
     #[serde(default)]
     actor: Option<String>,
@@ -717,7 +783,13 @@ impl Jay {
         Parameters(args): Parameters<PatchTaskArgs>,
     ) -> Result<CallToolResult, McpError> {
         let root = self.target_root(args.dir.as_deref())?;
-        let patch = service::parse_task_patch_value(&args.patch).map_err(mcp_err)?;
+        // Some clients stringify the last structured argument, so the patch
+        // object may also arrive as a JSON-encoded string (issue #5).
+        let patch = match &args.patch {
+            serde_json::Value::String(s) => service::parse_task_patch(s),
+            v => service::parse_task_patch_value(v),
+        }
+        .map_err(mcp_err)?;
         let actor = args.actor.unwrap_or_else(|| "agent".to_string());
         let t = service::patch_task(&root, args.id, patch, &format!("agent:{actor}"))
             .map_err(mcp_err)?;
@@ -1154,4 +1226,140 @@ pub async fn run() -> anyhow::Result<()> {
         .inspect_err(|e| eprintln!("error starting MCP server: {e}"))?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn from_value<T: serde::de::DeserializeOwned>(
+        value: serde_json::Value,
+    ) -> Result<T, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    #[test]
+    fn list_args_accept_native_arrays() {
+        let args: UpdateReportArgs = from_value(serde_json::json!({
+            "id": 1,
+            "problems": ["p1", "p2"],
+            "ideas": [],
+            "decisions": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            args.problems,
+            Some(vec!["p1".to_string(), "p2".to_string()])
+        );
+        assert_eq!(args.ideas, Some(Vec::new()));
+        assert_eq!(args.decisions, None);
+    }
+
+    #[test]
+    fn list_args_accept_json_encoded_strings() {
+        // issue #5: the last list argument of a call may arrive stringified
+        let decisions = serde_json::to_string(&["d1", "d2"]).unwrap();
+        let ideas = serde_json::to_string(&vec!["i1"]).unwrap();
+        let args: CompleteTaskArgs = from_value(serde_json::json!({
+            "id": 1,
+            "result": "r",
+            "validation": "v",
+            "problems": ["p1"],
+            "ideas": ideas,
+            "decisions": decisions,
+        }))
+        .unwrap();
+        assert_eq!(args.problems, Some(vec!["p1".to_string()]));
+        assert_eq!(args.ideas, Some(vec!["i1".to_string()]));
+        assert_eq!(
+            args.decisions,
+            Some(vec!["d1".to_string(), "d2".to_string()])
+        );
+    }
+
+    #[test]
+    fn list_args_tolerate_empty_and_null_values() {
+        let args: UpdateReportArgs = from_value(serde_json::json!({
+            "id": 1,
+            "problems": "",
+            "decisions": null,
+        }))
+        .unwrap();
+        assert_eq!(args.problems, Some(Vec::new()));
+        assert_eq!(args.decisions, None);
+
+        let args: CreateTaskArgs = from_value(serde_json::json!({
+            "title": "t",
+            "labels": "",
+            "acceptance": null,
+        }))
+        .unwrap();
+        assert!(args.labels.is_empty());
+        assert!(args.acceptance.is_empty());
+
+        let args: AddKbArgs = from_value(serde_json::json!({
+            "kind": "note",
+            "title": "t",
+            "content": "c",
+            "tags": "[]",
+        }))
+        .unwrap();
+        assert!(args.tags.is_empty());
+    }
+
+    #[test]
+    fn list_args_reject_non_json_strings() {
+        let err = from_value::<UpdateReportArgs>(serde_json::json!({
+            "id": 1,
+            "decisions": "not a json array",
+        }))
+        .err()
+        .expect("must fail");
+        assert!(
+            err.to_string().contains("expected a JSON array"),
+            "unexpected error: {err}"
+        );
+
+        let err = from_value::<CreateTaskArgs>(serde_json::json!({
+            "title": "t",
+            "labels": 3,
+        }))
+        .err()
+        .expect("must fail");
+        assert!(
+            err.to_string().contains("invalid type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn i64_list_args_accept_json_encoded_strings() {
+        let depends_on = serde_json::to_string(&[1i64, 2]).unwrap();
+        let args: CreateTaskArgs = from_value(serde_json::json!({
+            "title": "t",
+            "depends_on": depends_on,
+        }))
+        .unwrap();
+        assert_eq!(args.depends_on, vec![1, 2]);
+
+        let supersedes = serde_json::to_string(&[7i64]).unwrap();
+        let args: UpdateKbArgs = from_value(serde_json::json!({
+            "id": 1,
+            "kind": "status",
+            "supersedes": supersedes,
+            "tags": r#"["x"]"#,
+        }))
+        .unwrap();
+        assert_eq!(args.supersedes, Some(vec![7]));
+        assert_eq!(args.tags, Some(vec!["x".to_string()]));
+
+        let args: AddKbArgs = from_value(serde_json::json!({
+            "kind": "status",
+            "title": "t",
+            "content": "c",
+            "supersedes": "[]",
+        }))
+        .unwrap();
+        assert!(args.supersedes.is_empty());
+    }
 }
