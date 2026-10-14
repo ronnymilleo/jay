@@ -59,6 +59,7 @@ pub const KNOWN_TASK_FIELDS: &[&str] = &[
 /// Legacy task fields recognized for explicit repair (not "unknown").
 pub const LEGACY_TASK_FIELDS: &[&str] = &["closed_at"];
 
+/// Config fields doctor recognizes (anything else is reported as unknown).
 pub const KNOWN_CONFIG_FIELDS: &[&str] = &[
     "name",
     "description",
@@ -69,6 +70,7 @@ pub const KNOWN_CONFIG_FIELDS: &[&str] = &[
     "links",
 ];
 
+/// Knowledge base entry fields doctor recognizes.
 pub const KNOWN_KB_ENTRY_FIELDS: &[&str] = &[
     "id",
     "kind",
@@ -83,16 +85,21 @@ pub const KNOWN_KB_ENTRY_FIELDS: &[&str] = &[
     "updated_at",
 ];
 
+/// Milestone fields doctor recognizes.
 pub const KNOWN_MILESTONE_FIELDS: &[&str] = &["id", "name", "target_date", "done_at", "created_at"];
 
+/// How serious a diagnostic finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// A definite integrity problem: missing evidence or contradiction.
     Error,
+    /// A suspicious but readable record (often a legacy format).
     Warning,
 }
 
 impl Severity {
+    /// Returns the string form used in reports.
     pub fn as_str(self) -> &'static str {
         match self {
             Severity::Error => "error",
@@ -108,9 +115,11 @@ pub struct Finding {
     pub file: String,
     /// Field the finding refers to, when applicable.
     pub field: Option<String>,
+    /// How serious the finding is.
     pub severity: Severity,
     /// Stable machine-readable code (e.g. `task.closed_missing_done_at`).
     pub code: &'static str,
+    /// Human-readable explanation of the finding.
     pub message: String,
     /// Suggested action.
     pub suggestion: String,
@@ -157,7 +166,9 @@ fn rel(root: &Path, path: &Path) -> String {
 /// A parsed timestamp: either legacy naive-local or RFC 3339 with offset.
 #[derive(Debug, Clone)]
 pub enum Timestamp {
+    /// Legacy naive-local timestamp (no offset).
     Naive(chrono::NaiveDateTime),
+    /// RFC 3339 timestamp with an explicit offset.
     Offset(chrono::DateTime<chrono::FixedOffset>),
 }
 
@@ -1006,16 +1017,22 @@ fn report_unknown_fields(
 /// One proposed repair operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct RepairOp {
+    /// Path relative to the project root.
     pub file: String,
+    /// Stable machine-readable code of the underlying finding.
     pub code: &'static str,
+    /// What the repair will change.
     pub description: String,
 }
 
 /// Result of a repair run (dry run or apply).
 #[derive(Debug, Clone, Serialize)]
 pub struct RepairReport {
+    /// False for a dry run; true when changes were written.
     pub applied: bool,
+    /// The repair operations (proposed and, when applied, executed).
     pub proposed: Vec<RepairOp>,
+    /// Backup file paths created before rewriting originals.
     pub backups: Vec<String>,
     /// Error findings that repair cannot fix (they need explicit user/agent
     /// updates — jay never fabricates missing evidence).

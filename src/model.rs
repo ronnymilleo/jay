@@ -1,3 +1,6 @@
+//! Domain types: `Task`, `Milestone` and `KnowledgeEntry`, plus the task
+//! status state machine, priority, lifecycle events and report snapshots.
+
 use serde::{Deserialize, Serialize};
 
 /// Status of a task — a fixed, ordered state machine.
@@ -87,6 +90,7 @@ pub enum TaskAction {
 }
 
 impl TaskAction {
+    /// Returns the string form of the action (the CLI/MCP wire form).
     pub fn as_str(self) -> &'static str {
         match self {
             TaskAction::Start => "start",
@@ -124,14 +128,19 @@ impl std::str::FromStr for TaskAction {
 /// point in time — never silently reused as a new cycle's evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReportSnapshot {
+    /// The cycle's reported result.
     #[serde(default)]
     pub result: Option<String>,
+    /// The cycle's reported validation.
     #[serde(default)]
     pub validation: Option<String>,
+    /// The cycle's reported problems.
     #[serde(default)]
     pub problems: Vec<String>,
+    /// The cycle's reported ideas.
     #[serde(default)]
     pub ideas: Vec<String>,
+    /// The cycle's reported decisions.
     #[serde(default)]
     pub decisions: Vec<String>,
     /// Integration links (branch/PR) owned by that cycle.
@@ -145,10 +154,14 @@ pub struct ReportSnapshot {
 pub struct LifecycleEvent {
     /// RFC 3339 with offset.
     pub at: String,
+    /// Who performed the transition ("human" or `agent:<name>`).
     pub actor: String,
+    /// Status before the transition (None for the initial event).
     #[serde(default)]
     pub from: Option<TaskStatus>,
+    /// Status after the transition.
     pub to: TaskStatus,
+    /// Optional reason supplied with the transition (mandatory for reopen).
     #[serde(default)]
     pub reason: Option<String>,
     /// Prior completion timestamp preserved when reopening a closed task.
@@ -162,11 +175,14 @@ pub struct LifecycleEvent {
 /// Actor and reason supplied to a lifecycle transition.
 #[derive(Debug, Clone)]
 pub struct LifecycleCtx {
+    /// Who is performing the transition.
     pub actor: String,
+    /// Optional reason recorded with the transition.
     pub reason: Option<String>,
 }
 
 impl LifecycleCtx {
+    /// Builds a context from an actor name and an optional reason.
     pub fn new(actor: &str, reason: Option<&str>) -> Self {
         LifecycleCtx {
             actor: actor.to_string(),
@@ -178,20 +194,26 @@ impl LifecycleCtx {
 /// Priority of a task (JIRA-like).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Priority {
+    /// Drop-everything urgency.
     #[serde(rename = "highest")]
     Highest,
+    /// Important.
     #[serde(rename = "high")]
     High,
+    /// Normal work (default).
     #[default]
     #[serde(rename = "medium")]
     Medium,
+    /// Can wait.
     #[serde(rename = "low")]
     Low,
+    /// Someday / nice to have.
     #[serde(rename = "lowest")]
     Lowest,
 }
 
 impl Priority {
+    /// Returns the string form of the priority (the TOML wire form).
     pub fn as_str(self) -> &'static str {
         match self {
             Priority::Highest => "highest",
@@ -213,6 +235,7 @@ impl Priority {
         }
     }
 
+    /// All priorities in display order.
     pub const ALL: [Priority; 5] = [
         Priority::Highest,
         Priority::High,
@@ -259,8 +282,11 @@ pub struct GitDiagnostic {
 pub struct Task {
     /// Unique id — also the task file name (`.nest/tasks/<id>.toml`).
     pub id: i64,
+    /// Short, human-readable summary line.
     pub title: String,
+    /// What the work is; the body of the contract.
     pub description: String,
+    /// Lifecycle state (see [TaskStatus]).
     pub status: TaskStatus,
     /// Blocked flag — orthogonal to `status`; a blocked task can't transition.
     #[serde(default)]
@@ -268,30 +294,50 @@ pub struct Task {
     /// Optional reason recorded when the task is blocked.
     #[serde(default)]
     pub block_reason: Option<String>,
+    /// Acceptance criteria: checkable conditions for completion.
     pub acceptance: Vec<String>,
+    /// Free-form context for whoever picks the task up.
     pub context: String,
+    /// Optional owner (human or agent name).
     pub assignee: Option<String>,
+    /// Ordering weight (see [Priority]).
     pub priority: Priority,
+    /// Free-form labels for filtering.
     pub labels: Vec<String>,
+    /// Optional size estimate in story points.
     pub estimate_points: Option<i64>,
+    /// Optional effort estimate in hours.
     pub estimate_hours: Option<f64>,
+    /// Optional due date (date or datetime string).
     pub deadline: Option<String>,
+    /// External references (branch, PR, issue, doc URLs).
     pub links: Vec<String>,
+    /// Optional parent task id for task hierarchies.
     pub parent_id: Option<i64>,
+    /// Optional epic grouping.
     pub epic_id: Option<i64>,
+    /// Optional milestone grouping (see [Milestone]).
     pub milestone_id: Option<i64>,
     /// Structured local dependencies (task ids in this project). Independent
     /// of parent/epic/milestone relationships. A task is "ready" when open,
     /// unblocked and every dependency is closed (cancelled does NOT count).
     #[serde(default)]
     pub depends_on: Vec<i64>,
+    /// Report section: what was done.
     pub report_result: Option<String>,
+    /// Report section: implementation findings by the worker.
     pub report_problems: Vec<String>,
+    /// Report section: follow-up ideas worth promoting to tasks.
     pub report_ideas: Vec<String>,
+    /// Report section: decisions taken while working.
     pub report_decisions: Vec<String>,
+    /// Report section: how the result was verified.
     pub report_validation: Option<String>,
+    /// Creation timestamp (RFC 3339 with offset).
     pub created_at: String,
+    /// Set on the first start transition.
     pub started_at: Option<String>,
+    /// Set when the task closes successfully.
     pub done_at: Option<String>,
     /// Set on tasks created as an explicit follow-up of another task.
     /// Does not imply a dependency unless one is requested separately.
@@ -552,6 +598,7 @@ pub enum KnowledgeKind {
 }
 
 impl KnowledgeKind {
+    /// Returns the string form of the kind (the TOML wire form).
     pub fn as_str(self) -> &'static str {
         match self {
             KnowledgeKind::Decision => "decision",
@@ -569,6 +616,7 @@ impl KnowledgeKind {
         }
     }
 
+    /// All kinds in display order.
     pub const ALL: [KnowledgeKind; 3] = [
         KnowledgeKind::Decision,
         KnowledgeKind::Status,
@@ -593,12 +641,18 @@ impl std::str::FromStr for KnowledgeKind {
 /// query on demand instead of reading a monolithic handoff file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeEntry {
+    /// Unique id within the kind's file.
     pub id: i64,
+    /// Which file/collection this entry belongs to.
     pub kind: KnowledgeKind,
+    /// Short summary line.
     pub title: String,
+    /// The entry's body.
     pub content: String,
+    /// Free-form tags for filtering and search boosting.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional task this entry refers to.
     #[serde(default)]
     pub related_task: Option<i64>,
     /// Explicit supersession references (mainly status entries): the ids this
@@ -608,13 +662,17 @@ pub struct KnowledgeEntry {
     /// Optional Git commit reference recorded with the entry/summary.
     #[serde(default)]
     pub commit: Option<String>,
+    /// Who wrote the entry ("human" or `agent:<name>`).
     #[serde(default)]
     pub actor: Option<String>,
+    /// Creation timestamp (RFC 3339 with offset).
     pub created_at: String,
+    /// Last edit timestamp (RFC 3339 with offset).
     pub updated_at: String,
 }
 
 impl KnowledgeEntry {
+    /// Creates a fresh entry with default metadata and now timestamps.
     pub fn new(id: i64, kind: KnowledgeKind, title: String, content: String) -> Self {
         let now = now_ts();
         KnowledgeEntry {
@@ -636,10 +694,15 @@ impl KnowledgeEntry {
 /// A milestone (release/version, e.g. v1.0) that groups tasks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Milestone {
+    /// Unique milestone id.
     pub id: i64,
+    /// Display name (e.g. "v1.0").
     pub name: String,
+    /// Optional target date.
     pub target_date: Option<String>,
+    /// Set when the milestone ships.
     pub done_at: Option<String>,
+    /// Creation timestamp (RFC 3339 with offset).
     pub created_at: String,
 }
 

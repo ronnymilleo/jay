@@ -4,10 +4,15 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Name of the project metadata folder.
 pub const NEST_DIR: &str = ".nest";
+/// Config file name inside `.nest/`.
 pub const CONFIG_FILE: &str = "config.toml";
+/// Task file folder inside `.nest/`.
 pub const TASKS_DIR: &str = "tasks";
+/// Milestone file name inside `.nest/`.
 pub const MILESTONES_FILE: &str = "milestones.toml";
+/// Knowledge base folder inside `.nest/`.
 pub const KB_DIR: &str = "kb";
 
 /// Git/Forgejo automation policy for a project.
@@ -23,6 +28,7 @@ pub enum GitIntegration {
 }
 
 impl GitIntegration {
+    /// Returns the string form of the policy (the TOML wire form).
     pub fn as_str(self) -> &'static str {
         match self {
             GitIntegration::Off => "off",
@@ -47,20 +53,26 @@ impl std::str::FromStr for GitIntegration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default)]
+    /// Display name (defaults to the folder name).
     pub name: String,
     #[serde(default)]
+    /// One-line description.
     pub description: String,
     #[serde(default)]
+    /// Optional project goal statement.
     pub goal: Option<String>,
     #[serde(default)]
+    /// Repository URL used by git automation.
     pub git_repo: Option<String>,
     #[serde(default)]
+    /// Branch naming template for automation.
     pub branch_template: Option<String>,
     /// Explicit automation policy. `None` only happens in legacy configs;
     /// see [ProjectConfig::effective_git_integration].
     #[serde(default)]
     pub git_integration: Option<GitIntegration>,
     #[serde(default)]
+    /// External project references.
     pub links: Vec<String>,
 }
 
@@ -97,12 +109,14 @@ pub enum Context {
 }
 
 impl Context {
+    /// The filesystem root this context resolves to.
     pub fn root(&self) -> &Path {
         match self {
             Context::Project(p) | Context::Workspace(p) => p,
         }
     }
 
+    /// True when the context is a project (has its own `.nest/`).
     pub fn is_project(&self) -> bool {
         matches!(self, Context::Project(_))
     }
@@ -126,6 +140,9 @@ pub fn resolve_context() -> Result<Context> {
     resolve_context_at(&cwd)
 }
 
+/// Resolves the context for an explicit directory: a project (`.nest/`
+/// found at or above it), a workspace (direct project subfolders), or an
+/// error.
 pub fn resolve_context_at(cwd: &Path) -> Result<Context> {
     if let Some(root) = find_nest(cwd) {
         return Ok(Context::Project(root));
@@ -196,6 +213,7 @@ pub fn init_project(dir: &Path, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Reads `.nest/config.toml`.
 pub fn load_config(root: &Path) -> Result<ProjectConfig> {
     let path = root.join(NEST_DIR).join(CONFIG_FILE);
     let text = std::fs::read_to_string(&path)?;
@@ -225,6 +243,7 @@ pub fn atomic_write(path: &Path, data: &str) -> Result<()> {
     }
 }
 
+/// Writes the config atomically to `.nest/config.toml`.
 pub fn save_config(root: &Path, config: &ProjectConfig) -> Result<()> {
     let path = root.join(NEST_DIR).join(CONFIG_FILE);
     atomic_write(&path, &toml::to_string_pretty(config)?)

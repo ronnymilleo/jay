@@ -257,6 +257,7 @@ pub fn current_summary_ref(root: &Path) -> Result<Option<CurrentSummary>> {
 /// provenance, or the highest-id fallback labeled as a historical update.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CurrentStatus {
+    /// The entry presented as current.
     pub entry: KnowledgeEntry,
     /// True when an explicit current-summary reference designates this entry.
     pub designated: bool,
@@ -266,6 +267,7 @@ pub struct CurrentStatus {
     pub note: Option<String>,
 }
 
+/// Note attached to the fallback when no current summary is designated.
 pub const FALLBACK_NOTE: &str =
     "latest historical update; no current summary designated (set one with `jay kb set-current <id>` or MCP set_current_summary)";
 
@@ -584,7 +586,9 @@ const TITLE_BOOST: f64 = 2.0; // multiplier for title matches
 /// A search result with its BM25 relevance score.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// The matched entry.
     pub entry: KnowledgeEntry,
+    /// BM25 relevance score (higher = more relevant).
     pub score: f64,
 }
 
