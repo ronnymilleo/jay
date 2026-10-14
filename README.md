@@ -3,7 +3,7 @@
 [![CI](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml/badge.svg)](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/jay-task.svg)](https://crates.io/crates/jay-task)
 [![docs.rs](https://docs.rs/jay-task/badge.svg)](https://docs.rs/jay-task)
-[![License: MIT](https://img.shields.io/crates/l/jay-task.svg)](https://crates.io/crates/jay-task)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/ronnymilleo/jay/blob/main/LICENSE)
 
 Terminal project manager, git-like: one `.nest/` folder per project.
 
@@ -215,4 +215,4 @@ For full instructions, see [CLI tutorial](docs/CLI-TUTORIAL.md) and
 
 ## License
 
-Jay is licensed under the [MIT License](LICENCE).
+Jay is licensed under the [MIT License](LICENSE).
