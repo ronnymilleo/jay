@@ -1,6 +1,9 @@
 # Jay
 
 [![CI](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml/badge.svg)](https://github.com/ronnymilleo/jay/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/jay-task.svg)](https://crates.io/crates/jay-task)
+[![docs.rs](https://docs.rs/jay-task/badge.svg)](https://docs.rs/jay-task)
+[![License: MIT](https://img.shields.io/crates/l/jay-task.svg)](https://crates.io/crates/jay-task)
 
 Terminal project manager, git-like: one `.nest/` folder per project.
 
@@ -85,8 +88,9 @@ findings before releasing 1.0.0.
 
 ## How to run
 
+    cargo install jay-task --locked  # from crates.io (installs the jay command)
+    cargo install --path . --locked  # from a checkout, into ~/.cargo/bin
     cargo build --locked       # binary at target/debug/jay
-    cargo install --path . --locked  # install jay into ~/.cargo/bin
 
 Validation:
 
