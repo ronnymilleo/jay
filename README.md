@@ -62,9 +62,10 @@ git integration (`off` by default; `auto` records structured diagnostics),
 structured dependencies, current-summary designation with freshness facts,
 reopen-with-history and follow-ups. The interface is CLI and MCP; no TUI is included.
 
-Version 0.3.0 makes list output predictable: `task list` orders by id by
-default (with `--sort id|priority|status`), task tables show a Priority
-column, and project lists order by name. Continue recording compatibility
+Version 0.3.1 makes MCP list arguments tolerant: fields like
+`problems`/`ideas`/`decisions` also accept JSON-encoded array strings (some
+clients stringify the last list argument), as does the `patch` object. The
+announced JSON schema is unchanged. Continue recording compatibility
 findings before releasing 1.0.0.
 
 ## Structure
