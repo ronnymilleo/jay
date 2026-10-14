@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    name: fmt + clippy
+    name: fmt + clippy + docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   test:
     name: test

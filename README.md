@@ -97,6 +97,7 @@ Validation:
     cargo test --locked
     cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 
 Common commands:
 

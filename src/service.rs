@@ -38,10 +38,13 @@ pub struct ProjectLock {
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ProjectLock {
+    /// Acquires the project lock with the default timeout (10s).
     pub fn acquire(root: &Path) -> Result<Self> {
         Self::acquire_with_timeout(root, DEFAULT_LOCK_TIMEOUT)
     }
 
+    /// Acquires the project lock, waiting up to `timeout` for a competing
+    /// process before failing.
     pub fn acquire_with_timeout(root: &Path, timeout: Duration) -> Result<Self> {
         std::fs::create_dir_all(root.join(NEST_DIR))?;
         let path = root.join(NEST_DIR).join("lock");
@@ -87,8 +90,11 @@ impl ProjectLock {
 /// *null* (clear a nullable field) and a *value*.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchField<T> {
+    /// Field omitted from the patch — leave the current value unchanged.
     Absent,
+    /// Explicit null — clear the nullable field.
     Null,
+    /// A new value for the field.
     Value(T),
 }
 
@@ -153,34 +159,49 @@ pub const PROTECTED_TASK_FIELDS: &[&str] = &[
 #[serde(deny_unknown_fields)]
 pub struct TaskPatch {
     #[serde(default)]
+    /// Short summary line.
     pub title: PatchField<String>,
     #[serde(default)]
+    /// What the work is.
     pub description: PatchField<String>,
     #[serde(default)]
+    /// Acceptance criteria.
     pub acceptance: PatchField<Vec<String>>,
     #[serde(default)]
+    /// Free-form context.
     pub context: PatchField<String>,
     #[serde(default)]
+    /// Optional owner.
     pub assignee: PatchField<String>,
     #[serde(default)]
+    /// Priority name (parsed; required when present).
     pub priority: PatchField<String>,
     #[serde(default)]
+    /// Free-form labels.
     pub labels: PatchField<Vec<String>>,
     #[serde(default)]
+    /// Story-point estimate.
     pub estimate_points: PatchField<i64>,
     #[serde(default)]
+    /// Hours estimate.
     pub estimate_hours: PatchField<f64>,
     #[serde(default)]
+    /// Due date.
     pub deadline: PatchField<String>,
     #[serde(default)]
+    /// External references.
     pub links: PatchField<Vec<String>>,
     #[serde(default)]
+    /// Parent task id.
     pub parent_id: PatchField<i64>,
     #[serde(default)]
+    /// Epic grouping.
     pub epic_id: PatchField<i64>,
     #[serde(default)]
+    /// Milestone grouping.
     pub milestone_id: PatchField<i64>,
     #[serde(default)]
+    /// Dependency edges (validated: no duplicates/missing/self/cycles).
     pub depends_on: PatchField<Vec<i64>>,
 }
 
@@ -192,6 +213,7 @@ pub fn parse_task_patch(text: &str) -> Result<TaskPatch> {
     parse_task_patch_value(&value)
 }
 
+/// Same as [parse_task_patch], for an already-parsed JSON value.
 pub fn parse_task_patch_value(value: &serde_json::Value) -> Result<TaskPatch> {
     let obj = value
         .as_object()
@@ -251,19 +273,33 @@ fn apply_patch(task: &mut Task, p: TaskPatch) -> Result<()> {
 /// Legacy PUT-style whole-record replacement (the old MCP `update_task`
 /// semantics, kept as a documented legacy operation).
 pub struct TaskReplace {
+    /// Short summary line.
     pub title: String,
+    /// What the work is.
     pub description: String,
+    /// Acceptance criteria.
     pub acceptance: Vec<String>,
+    /// Free-form context.
     pub context: String,
+    /// Optional owner.
     pub assignee: Option<String>,
+    /// Ordering weight.
     pub priority: Priority,
+    /// Free-form labels.
     pub labels: Vec<String>,
+    /// Story-point estimate.
     pub estimate_points: Option<i64>,
+    /// Hours estimate.
     pub estimate_hours: Option<f64>,
+    /// Due date.
     pub deadline: Option<String>,
+    /// External references.
     pub links: Vec<String>,
+    /// Parent task id.
     pub parent_id: Option<i64>,
+    /// Epic grouping.
     pub epic_id: Option<i64>,
+    /// Milestone grouping.
     pub milestone_id: Option<i64>,
 }
 
@@ -276,14 +312,19 @@ pub struct TaskReplace {
 #[serde(deny_unknown_fields)]
 pub struct ReportUpdate {
     #[serde(default)]
+    /// The result section.
     pub result: Option<String>,
     #[serde(default)]
+    /// The validation section.
     pub validation: Option<String>,
     #[serde(default)]
+    /// The problems section.
     pub problems: Option<Vec<String>>,
     #[serde(default)]
+    /// The ideas section.
     pub ideas: Option<Vec<String>>,
     #[serde(default)]
+    /// The decisions section.
     pub decisions: Option<Vec<String>>,
 }
 
@@ -297,6 +338,7 @@ impl ReportUpdate {
     }
 }
 
+/// How a [ReportUpdate] merges into an existing report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportMode {
     /// Omitted sections unchanged; provided sections overwrite.

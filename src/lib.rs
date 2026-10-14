@@ -14,6 +14,8 @@
 //! - [mcp] — MCP server (the orchestrator agent's interface).
 //! - [gitflow] — optional branch/PR automation.
 
+#![warn(missing_docs)]
+
 pub mod cli;
 pub mod diag;
 pub mod forgejo;
