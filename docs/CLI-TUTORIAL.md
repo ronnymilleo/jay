@@ -160,6 +160,47 @@ no missing ids, no self-dependency, no cycles. Effects:
 Prose dependencies ("Depends on #20" in `context`) are never parsed
 automatically; review the text and add explicit edges.
 
+## 9b. Epics (groups with derived progress)
+
+An epic groups related tasks — one per pull request, theme or release. It is a
+regular task with `kind = "epic"`, so its status, history and report sections
+work exactly like any task; children join it through their `epic_id`:
+
+    jay task new "Release 1.0" --kind epic        # create the epic (say, id 5)
+    jay task new "Write the migration" --epic 5   # a child of epic #5
+    jay task new "Update the docs" --epic 5
+
+Progress is always derived from the children — nothing is stored, so it cannot
+drift:
+
+    jay epic list            # ID  Status  Progress      Title
+    jay epic list --json
+    jay epic show 5          # the epic plus its children and their statuses
+
+Unlike dependencies, an epic does not gate its children: they are ready on
+their own. `jay next` skips epics (a group is not a unit of work) and groups
+the ready children by epic:
+
+    epic #5: Release 1.0 (1/2 closed)
+    #6  high    Update the docs
+    (no epic)
+    #9  medium  Harden the importer
+
+When the last child closes, the epic advances to `review` on its own, ready
+for its own summary report:
+
+    jay task complete 5 --report-file epic-report.json
+
+Rules enforced by the CLI, MCP and `doctor`:
+
+- `epic_id` must point at a task created with `--kind epic`;
+- an epic cannot belong to another epic (`epic_id` is top-level);
+- an epic cannot be closed while a child is still open; a cancelled child was
+  explicitly descoped and counts as resolved (closed children are still shown
+  separately as `closed/total`);
+- an epic that still has children cannot be demoted back to `kind = "task"`;
+- moving a task is refused while an epic edge would break.
+
 ## 10. Rewind, cancel, reopen, follow-ups
 
     jay task rewind 2     # review -> started -> open (one step back)
@@ -283,7 +324,7 @@ init needed.
 | jay config [field] [value] | — | read/edit config |
 | jay doctor [--json] | — | validate (exit 0/1/2) |
 | jay repair [--apply] | — | explicit safe repairs (backups on apply) |
-| jay task new <title> [flags] | — | create a task (--depends-on repeatable) |
+| jay task new <title> [flags] | — | create a task (--kind task\|epic, --epic <id>, --depends-on repeatable) |
 | jay task list [--sort id\|priority\|status] | task ls | list tasks (id order by default) |
 | jay task show <id> | — | full detail + history |
 | jay task find <term> [flags] | — | fuzzy search + filters |
@@ -300,6 +341,8 @@ init needed.
 | jay task reopen <id> [--reason] | — | cancelled/closed -> open |
 | jay task follow-up <id> --title <t> | — | linked follow-up task |
 | jay task move <id> --to <dir> | — | move a task (guarded) |
+| jay epic list [--json] | epic ls | epics with derived progress |
+| jay epic show <id> | — | an epic and its children |
 | jay kb status / draft-status / set-current / add / list / show / edit / search | — | knowledge base |
 | jay project list | project ls | list projects (workspace) |
 | jay sync | — | git pull+push |

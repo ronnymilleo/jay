@@ -7,6 +7,7 @@
 //! - [model] — domain types: `Task`, `Milestone`, `KnowledgeEntry`, status/priority.
 //! - [project] — project resolution, init and config (the `.nest/` folder).
 //! - [tasks] — plain-text persistence (one TOML file per task).
+//! - [epic] — derived progress of epics (tasks with `kind = "epic"`).
 //! - [knowledge] — project knowledge base (decisions, status, notes).
 //! - [diag] — data-integrity diagnostics (doctor) and explicit repair.
 //! - [service] — shared task mutation service (lock, atomic writes, patch/report/complete).
@@ -18,6 +19,7 @@
 
 pub mod cli;
 pub mod diag;
+pub mod epic;
 pub mod forgejo;
 pub mod gitflow;
 pub mod knowledge;

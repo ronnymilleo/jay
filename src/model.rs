@@ -68,6 +68,46 @@ impl std::str::FromStr for TaskStatus {
     }
 }
 
+/// What a task represents. A regular task is a unit of work; an epic is
+/// itself a regular task (same states, report and history) that groups other
+/// tasks through their `epic_id`. An epic's progress is always derived from
+/// its children — never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TaskKind {
+    /// A unit of work (default).
+    #[default]
+    #[serde(rename = "task")]
+    Task,
+    /// A grouping task; children join it through `epic_id`.
+    #[serde(rename = "epic")]
+    Epic,
+}
+
+impl TaskKind {
+    /// Returns the string form of the kind (the TOML wire form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskKind::Task => "task",
+            TaskKind::Epic => "epic",
+        }
+    }
+
+    /// All kinds in display order.
+    pub const ALL: [TaskKind; 2] = [TaskKind::Task, TaskKind::Epic];
+}
+
+impl std::str::FromStr for TaskKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "task" => Ok(TaskKind::Task),
+            "epic" => Ok(TaskKind::Epic),
+            other => anyhow::bail!("unknown task kind: {other} (use task|epic)"),
+        }
+    }
+}
+
 /// A state-machine action — what a `task <cmd>` or an MCP call performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskAction {
@@ -288,6 +328,10 @@ pub struct Task {
     pub description: String,
     /// Lifecycle state (see [TaskStatus]).
     pub status: TaskStatus,
+    /// What this task represents (see [TaskKind]); an epic groups children
+    /// through their `epic_id`. Existing files without the field are tasks.
+    #[serde(default)]
+    pub kind: TaskKind,
     /// Blocked flag — orthogonal to `status`; a blocked task can't transition.
     #[serde(default)]
     pub blocked: bool,
@@ -314,7 +358,8 @@ pub struct Task {
     pub links: Vec<String>,
     /// Optional parent task id for task hierarchies.
     pub parent_id: Option<i64>,
-    /// Optional epic grouping.
+    /// Optional epic this task belongs to; it must reference a task with
+    /// `kind = "epic"`. Epics do not themselves have an `epic_id`.
     pub epic_id: Option<i64>,
     /// Optional milestone grouping (see [Milestone]).
     pub milestone_id: Option<i64>,
@@ -375,6 +420,7 @@ impl Task {
             title,
             description,
             status: TaskStatus::Open,
+            kind: TaskKind::Task,
             blocked: false,
             block_reason: None,
             acceptance: Vec::new(),
@@ -519,9 +565,14 @@ impl Task {
                         }
                     }
                     TaskAction::Review => {
-                        if self.status != TaskStatus::Started {
+                        // An epic has no work of its own: once its children
+                        // are closed it may move to review straight from open
+                        // (as well as from started, like any task).
+                        let from_open_epic =
+                            self.kind == TaskKind::Epic && self.status == TaskStatus::Open;
+                        if self.status != TaskStatus::Started && !from_open_epic {
                             anyhow::bail!(
-                                "cannot review a {} task (must be started)",
+                                "cannot review a {} task (must be started, or an epic in open)",
                                 self.status.as_str()
                             );
                         }
@@ -728,6 +779,44 @@ mod tests {
         let s = toml::to_string_pretty(&t).unwrap();
         assert!(s.contains("status = \"open\""));
         assert!(s.contains("priority = \"medium\""));
+        assert!(s.contains("kind = \"task\""));
+    }
+
+    #[test]
+    fn kind_parses_names_and_defaults_to_task() {
+        assert_eq!("task".parse::<TaskKind>().unwrap(), TaskKind::Task);
+        assert_eq!("epic".parse::<TaskKind>().unwrap(), TaskKind::Epic);
+        assert_eq!(" epic ".parse::<TaskKind>().unwrap(), TaskKind::Epic);
+        assert!("feature".parse::<TaskKind>().is_err());
+
+        let text = r#"id = 1
+title = "legacy"
+description = ""
+status = "open"
+acceptance = []
+context = ""
+priority = "medium"
+labels = []
+links = []
+report_problems = []
+report_ideas = []
+report_decisions = []
+created_at = "2026-09-11T01:13:03"
+updated_at = "2026-09-11T01:13:03"
+"#;
+        let t: Task = toml::from_str(text).unwrap();
+        assert_eq!(t.kind, TaskKind::Task, "missing kind defaults to task");
+    }
+
+    #[test]
+    fn epic_may_go_to_review_from_open_but_a_task_may_not() {
+        let mut epic = Task::new(1, "e".into(), String::new());
+        epic.kind = TaskKind::Epic;
+        epic.apply(TaskAction::Review, &ctx(None)).unwrap();
+        assert_eq!(epic.status, TaskStatus::Review);
+
+        let mut task = Task::new(2, "t".into(), String::new());
+        assert!(task.apply(TaskAction::Review, &ctx(None)).is_err());
     }
 
     #[test]
@@ -1068,5 +1157,6 @@ updated_at = "2026-09-11T01:29:23"
         assert!(t.history.is_empty(), "past transitions are never invented");
         assert_eq!(t.follow_up_of, None);
         assert!(t.depends_on.is_empty());
+        assert_eq!(t.kind, TaskKind::Task);
     }
 }

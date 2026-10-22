@@ -8,8 +8,11 @@ use std::sync::OnceLock;
 
 use comfy_table::{presets, Cell, CellAlignment, Color, ContentArrangement, Table};
 
+use crate::epic;
 use crate::knowledge;
-use crate::model::{KnowledgeEntry, KnowledgeKind, Priority, Task, TaskAction, TaskStatus};
+use crate::model::{
+    KnowledgeEntry, KnowledgeKind, Priority, Task, TaskAction, TaskKind, TaskStatus,
+};
 use crate::project::{self, Context as JayContext, ProjectConfig};
 use crate::tasks;
 
@@ -103,11 +106,29 @@ struct Cli {
 }
 
 /// Arguments to improve listing readability
-#[derive(Args)]
+#[derive(Args, Clone, Copy)]
 struct TableArgs {
     /// Table border style for list/find output.
     #[arg(long, global = true, value_enum, default_value_t = BorderStyle::None)]
     border: BorderStyle,
+}
+
+/// Task kind argument for `task new`.
+#[derive(Clone, Copy, ValueEnum)]
+enum KindArg {
+    /// A unit of work (default).
+    Task,
+    /// A grouping task; children join it through `--epic`.
+    Epic,
+}
+
+impl From<KindArg> for TaskKind {
+    fn from(k: KindArg) -> Self {
+        match k {
+            KindArg::Task => TaskKind::Task,
+            KindArg::Epic => TaskKind::Epic,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -170,6 +191,12 @@ enum Command {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
+    /// Epic operations: list epics with derived progress, or show one with
+    /// its children.
+    Epic {
+        #[command(subcommand)]
+        cmd: EpicCmd,
+    },
     /// Project (workspace) operations.
     Project {
         #[command(subcommand)]
@@ -199,6 +226,12 @@ enum TaskCmd {
         estimate_hours: Option<f64>,
         #[arg(long)]
         deadline: Option<String>,
+        /// What this is: "task" (default) or "epic" (a grouping task).
+        #[arg(long, value_enum, default_value_t = KindArg::Task)]
+        kind: KindArg,
+        /// Epic this task belongs to (the referenced task must be an epic).
+        #[arg(long)]
+        epic: Option<i64>,
         /// Task ids this task depends on (repeatable; project-local).
         #[arg(long)]
         depends_on: Vec<i64>,
@@ -307,6 +340,20 @@ enum TaskCmd {
     },
     /// Link a closed task to a verified local completion commit.
     LinkCommit { id: i64, commit: String },
+}
+
+#[derive(Subcommand)]
+enum EpicCmd {
+    /// List epics with derived progress (closed/total children).
+    #[command(alias = "ls")]
+    List {
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        table_args: TableArgs,
+    },
+    /// Show an epic and its children with their statuses.
+    Show { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -458,6 +505,7 @@ pub fn run() -> Result<i32> {
         Command::Doctor { json } => return cmd_doctor(json),
         Command::Repair { apply } => cmd_repair(apply)?,
         Command::Task { cmd } => run_task(cmd)?,
+        Command::Epic { cmd } => run_epic(cmd)?,
         Command::Project { cmd } => run_project(cmd)?,
         Command::Kb { cmd } => run_kb(cmd)?,
     }
@@ -474,6 +522,8 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             estimate_points,
             estimate_hours,
             deadline,
+            kind,
+            epic,
             depends_on,
         } => cmd_new(
             title,
@@ -483,6 +533,8 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             estimate_points,
             estimate_hours,
             deadline,
+            kind.into(),
+            epic,
             depends_on,
         ),
         TaskCmd::List {
@@ -586,12 +638,27 @@ fn cmd_task_report(id: i64, report_file: String, append: bool) -> Result<()> {
 fn cmd_task_complete(id: i64, report_file: String) -> Result<()> {
     let root = require_project()?;
     let upd = parse_report_payload(&report_file)?;
+    let epic_before = tasks::load_task(&root, id)?
+        .and_then(|t| t.epic_id)
+        .and_then(|eid| {
+            tasks::load_task(&root, eid)
+                .ok()
+                .flatten()
+                .map(|e| (eid, e.status))
+        });
     let t = crate::service::complete_task(&root, id, upd, actor())?;
     println!(
         "task {} completed (report saved, status: {})",
         t.id,
         t.status.as_str()
     );
+    if let Some((eid, before)) = epic_before {
+        if let Some(epic) = tasks::load_task(&root, eid)? {
+            if epic.status != before && epic.status == TaskStatus::Review {
+                println!("epic #{eid} advanced to review (all children resolved)");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -600,6 +667,108 @@ fn cmd_task_link_commit(id: i64, commit: String) -> Result<()> {
     let task = crate::service::link_commit(&root, id, &commit, actor())?;
     let linked = task.links.iter().find(|link| link.starts_with("commit:"));
     println!("task {id} linked to {}", linked.unwrap_or(&commit));
+    Ok(())
+}
+
+fn run_epic(cmd: EpicCmd) -> Result<()> {
+    match cmd {
+        EpicCmd::List { json, table_args } => cmd_epic_list(json, table_args),
+        EpicCmd::Show { id } => cmd_epic_show(id),
+    }
+}
+
+fn cmd_epic_list(json: bool, table_args: TableArgs) -> Result<()> {
+    let root = require_project()?;
+    let all = tasks::load_tasks(&root)?;
+    let epics = epic::list(&all);
+    if json {
+        let rows: Vec<serde_json::Value> = epics
+            .iter()
+            .map(|e| {
+                let p = epic::progress(&all, e.id);
+                serde_json::json!({
+                    "id": e.id,
+                    "title": e.title,
+                    "status": e.status.as_str(),
+                    "total": p.total,
+                    "closed": p.closed,
+                    "cancelled": p.cancelled,
+                    "is_complete": p.is_complete(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if epics.is_empty() {
+        println!("(no epics)");
+        return Ok(());
+    }
+    let mut table = Table::new();
+    table
+        .set_header(vec!["ID", "Status", "Progress", "Title"])
+        .load_preset(table_args.border.preset())
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    for e in epics {
+        let p = epic::progress(&all, e.id);
+        let progress = if p.has_no_children() {
+            "(no children)".to_string()
+        } else {
+            format!("{}/{} closed", p.closed, p.total)
+        };
+        table.add_row(vec![
+            Cell::new(e.id.to_string()),
+            status_cell(e.status),
+            Cell::new(progress),
+            Cell::new(e.title.clone()),
+        ]);
+    }
+    table
+        .column_mut(0)
+        .expect("column")
+        .set_cell_alignment(CellAlignment::Right);
+    println!("{}", table.trim_fmt());
+    Ok(())
+}
+
+fn cmd_epic_show(id: i64) -> Result<()> {
+    let root = require_project()?;
+    let all = tasks::load_tasks(&root)?;
+    let e = all
+        .iter()
+        .find(|t| t.id == id && t.kind == TaskKind::Epic)
+        .ok_or_else(|| anyhow::anyhow!("epic {id} not found (the task must have kind = epic)"))?;
+    let p = epic::progress(&all, id);
+    let mut s = String::new();
+    s.push_str(&format!("epic #{} {}\n", e.id, e.title));
+    s.push_str(&format!("status: {}\n", e.status.as_str()));
+    if p.has_no_children() {
+        s.push_str("progress: (no children)\n");
+    } else {
+        s.push_str(&format!("progress: {}/{} closed", p.closed, p.total));
+        if p.cancelled > 0 {
+            s.push_str(&format!(" ({} cancelled)", p.cancelled));
+        }
+        s.push('\n');
+    }
+    if !e.description.is_empty() {
+        s.push_str(&format!("\n{}\n", e.description));
+    }
+    let children = epic::children(&all, id);
+    if children.is_empty() {
+        s.push_str("\nchildren: (none)\n");
+    } else {
+        s.push_str("\nchildren:\n");
+        for c in children {
+            s.push_str(&format!(
+                "  #{:<3} [{}] {}\n",
+                c.id,
+                c.status.as_str(),
+                c.title
+            ));
+        }
+    }
+    page(&s);
     Ok(())
 }
 
@@ -1212,6 +1381,8 @@ fn cmd_new(
     estimate_points: Option<i64>,
     estimate_hours: Option<f64>,
     deadline: Option<String>,
+    kind: TaskKind,
+    epic: Option<i64>,
     depends_on: Vec<i64>,
 ) -> Result<()> {
     let root = require_project()?;
@@ -1225,16 +1396,25 @@ fn cmd_new(
         t.estimate_points = estimate_points;
         t.estimate_hours = estimate_hours;
         t.deadline = deadline;
+        t.kind = kind;
+        t.epic_id = epic;
         t.depends_on = depends_on;
         t.actor = Some(actor().to_string());
         t
     })?;
-    println!("created task {}: {}", t.id, t.title);
+    match t.kind {
+        TaskKind::Epic => println!("created epic {}: {}", t.id, t.title),
+        TaskKind::Task => match t.epic_id {
+            Some(epic_id) => println!("created task {} in epic #{}: {}", t.id, epic_id, t.title),
+            None => println!("created task {}: {}", t.id, t.title),
+        },
+    }
     Ok(())
 }
 
 fn cmd_next(json: bool, table_args: TableArgs) -> Result<()> {
     let root = require_project()?;
+    // ready_tasks already excludes epics: a group is not a unit of work.
     let ready = crate::service::ready_tasks(&root)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&ready)?);
@@ -1244,16 +1424,63 @@ fn cmd_next(json: bool, table_args: TableArgs) -> Result<()> {
         println!("(no ready tasks: everything open is blocked or waiting on dependencies)");
         return Ok(());
     }
+    let all = tasks::load_tasks(&root)?;
+    let mut epic_ids: Vec<i64> = ready.iter().filter_map(|t| t.epic_id).collect();
+    epic_ids.sort_unstable();
+    epic_ids.dedup();
+
+    let mut first = true;
+    for epic_id in epic_ids {
+        let (title, p) = match all.iter().find(|t| t.id == epic_id) {
+            Some(e) => (e.title.clone(), epic::progress(&all, epic_id)),
+            None => (
+                format!("(missing epic #{epic_id})"),
+                epic::progress(&all, epic_id),
+            ),
+        };
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("epic #{epic_id}: {title} ({}/{} closed)", p.closed, p.total);
+        print_ready_rows(
+            ready
+                .iter()
+                .filter(|t| t.epic_id == Some(epic_id))
+                .map(|t| (t.id, t.priority.as_str(), t.title.as_str())),
+            table_args,
+        );
+    }
+    let ungrouped: Vec<&Task> = ready.iter().filter(|t| t.epic_id.is_none()).collect();
+    if !ungrouped.is_empty() {
+        if !first {
+            println!();
+        }
+        println!("(no epic)");
+        print_ready_rows(
+            ungrouped
+                .iter()
+                .map(|t| (t.id, t.priority.as_str(), t.title.as_str())),
+            table_args,
+        );
+    }
+    Ok(())
+}
+
+fn print_ready_rows<'a>(
+    rows: impl Iterator<Item = (i64, &'a str, &'a str)>,
+    table_args: TableArgs,
+) {
     let mut table = Table::new();
     table
         .set_header(vec!["ID", "Priority", "Title"])
         .load_preset(table_args.border.preset())
         .set_content_arrangement(ContentArrangement::Dynamic);
-    for t in &ready {
+    for (id, priority, title) in rows {
         table.add_row(vec![
-            Cell::new(t.id.to_string()),
-            Cell::new(t.priority.as_str()),
-            Cell::new(t.title.clone()),
+            Cell::new(id.to_string()),
+            Cell::new(priority),
+            Cell::new(title),
         ]);
     }
     table
@@ -1261,7 +1488,6 @@ fn cmd_next(json: bool, table_args: TableArgs) -> Result<()> {
         .expect("column")
         .set_cell_alignment(CellAlignment::Right);
     println!("{}", table.trim_fmt());
-    Ok(())
 }
 
 fn status_overview(json: bool) -> Result<()> {
@@ -1366,6 +1592,19 @@ fn format_task_detail(t: &Task, all: &[Task]) -> String {
     let mut s = String::new();
     s.push_str(&format!("#{} {}\n", t.id, t.title));
     s.push_str(&format!("status: {}\n", t.status.as_str()));
+    s.push_str(&format!("kind: {}\n", t.kind.as_str()));
+    if let Some(epic_id) = t.epic_id {
+        let title = all
+            .iter()
+            .find(|o| o.id == epic_id)
+            .map(|o| o.title.as_str())
+            .unwrap_or("(missing)");
+        s.push_str(&format!("epic: #{epic_id} {title}\n"));
+    }
+    if t.kind == TaskKind::Epic {
+        let p = epic::progress(all, t.id);
+        s.push_str(&format!("children: {}/{} closed\n", p.closed, p.total));
+    }
     s.push_str(&format!("priority: {}\n", t.priority.as_str()));
     if !t.labels.is_empty() {
         s.push_str(&format!("labels: {}\n", t.labels.join(", ")));
