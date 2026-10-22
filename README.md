@@ -63,18 +63,21 @@ sync/doctor/repair + task/project/kb subcommands), MCP server (context, task,
 patch/report/complete, KB, readiness and project-context tools), explicit
 git integration (`off` by default; `auto` records structured diagnostics),
 structured dependencies, current-summary designation with freshness facts,
-reopen-with-history and follow-ups. The interface is CLI and MCP; no TUI is included.
+reopen-with-history, follow-ups and epics with derived progress. The interface
+is CLI and MCP; no TUI is included.
 
-Version 0.3.1 makes MCP list arguments tolerant: fields like
-`problems`/`ideas`/`decisions` also accept JSON-encoded array strings (some
-clients stringify the last list argument), as does the `patch` object. The
-announced JSON schema is unchanged. Continue recording compatibility
-findings before releasing 1.0.0.
+Version 0.4.0 adds epics: a task with `kind = "epic"` groups children through
+their `epic_id`, progress is derived from the children, the epic advances to
+review when its last child resolves, `jay next` groups ready children by epic
+and `jay epic list`/`show` give the grouped view (CLI and MCP). The 0.3.1
+tolerance for JSON-encoded MCP list arguments is unchanged. Continue recording
+compatibility findings before releasing 1.0.0.
 
 ## Structure
 
 - src/project.rs — resolution, init and config (the `.nest/` folder), atomic writes
 - src/tasks.rs — plain-text persistence (one TOML file per task)
+- src/epic.rs — derived progress of epics (tasks with `kind = "epic"`)
 - src/model.rs — Task / Milestone / KnowledgeEntry / status / priority / lifecycle events
 - src/service.rs — shared mutation service: project lock, patch, typed report, complete, follow-up, moves
 - src/diag.rs — doctor findings (stable codes, severities) and explicit repair
@@ -111,7 +114,7 @@ Common commands:
     jay repair [--apply]       # explicit safe repairs (dry run by default, backups on apply)
     jay mcp                    # MCP server over stdio (for agents)
 
-    jay task new <title> [--priority ...] [--label ...] [--estimate-points ...] [--depends-on <id>...]
+    jay task new <title> [--kind task|epic] [--epic <id>] [--priority ...] [--label ...] [--estimate-points ...] [--depends-on <id>...]
     jay task list [--sort id|priority|status]  # list tasks by id (alias: ls)
     jay task show <id>         # full detail + report + dependencies + history
     jay task find <term> [--priority ...] [--label ...] [--status ...]
@@ -127,6 +130,9 @@ Common commands:
     jay task reopen <id> [--reason ...]   # cancelled -> open; closed -> open needs a reason
     jay task follow-up <id> --title <t> [--description <d>]  # linked follow-up task
     jay task move <id> --to <dir>
+
+    jay epic list [--json]     # epics with derived progress (closed/total)
+    jay epic show <id>         # an epic and its children with statuses
 
     jay project list           # list projects in a workspace, by name (alias: ls)
 
@@ -156,7 +162,7 @@ Git and leave it in place. Building requires Rust 1.89 or newer. See
 ## MCP tools
 
 - context: init_project / current_project / list_projects / get_config / update_config / project_context
-- tasks: list_tasks / create_task / get_task / patch_task / update_task_status / move_task / next_tasks / create_follow_up
+- tasks: list_tasks / list_epics / create_task / get_task / patch_task / update_task_status / move_task / next_tasks / create_follow_up
 - report: update_report (typed, replace|append) / complete_task (report + close, atomic) / promote_idea
 - knowledge: get_project_status / set_current_summary / list_kb / get_kb / add_kb / update_kb / search_kb
 - legacy (documented replacement semantics): update_task / update_report_section
@@ -199,6 +205,31 @@ duplicates, missing ids, self-dependency or cycles). `jay next` / MCP
 cross-project moves are refused while dependency or follow-up edges would
 break. Prose dependencies in `context` are never parsed automatically — an
 agent reviews the text and adds explicit edges via `patch_task`.
+
+## Epics (groups with derived progress)
+
+An epic groups tasks — one per pull request, theme or release. It is a
+regular task with `kind = "epic"`, so status, history and report sections keep
+working; children join it through their `epic_id`:
+
+    jay task new "Release 1.0" --kind epic        # the epic itself
+    jay task new "Write the migration" --epic 5   # a child of epic #5
+
+Progress is always derived from the children — never stored, so it cannot
+drift: `jay epic list` shows `4/6 closed`, and `jay epic show <id>` lists the
+children with their states. Rules:
+
+- an epic has no work of its own: it may move to review straight from `open`
+  (and is advanced there automatically when its last child closes);
+- an epic cannot be closed while a child is still open; a cancelled child was
+  explicitly descoped and counts as resolved (closed children are still
+  reported separately as `closed/total`);
+- an epic is never listed as ready work — `jay next` skips epics and groups the
+  ready children by epic;
+- `epic_id` must reference a task created with `--kind epic`, an epic cannot
+  belong to another epic, and an epic with children cannot be demoted to a
+  regular task;
+- moving a task across projects is refused while an epic edge would break.
 
 ## Example workspace
 

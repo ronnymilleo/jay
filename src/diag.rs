@@ -26,6 +26,7 @@ pub const KNOWN_TASK_FIELDS: &[&str] = &[
     "title",
     "description",
     "status",
+    "kind",
     "blocked",
     "block_reason",
     "acceptance",
@@ -664,6 +665,47 @@ fn cross_check_tasks(files: &[TaskFile], milestones: &[Milestone], findings: &mu
                     )
                     .with_field("milestone_id"),
                 );
+            }
+        }
+        // epic consistency: epics are top-level, and epic_id must point at one
+        use crate::model::TaskKind;
+        if t.kind == TaskKind::Epic && t.epic_id.is_some() {
+            findings.push(
+                Finding::error(
+                    &tf.rel,
+                    "task.epic_nested",
+                    format!("epic {} belongs to another epic", t.id),
+                    "clear epic_id — epics are top-level groups",
+                )
+                .with_field("epic_id"),
+            );
+        } else if let Some(id) = t.epic_id {
+            if id == t.id {
+                findings.push(
+                    Finding::error(
+                        &tf.rel,
+                        "task.epic_self",
+                        format!("task {} is its own epic", t.id),
+                        "clear or fix epic_id",
+                    )
+                    .with_field("epic_id"),
+                );
+            } else if let Some(target) = all_tasks.iter().find(|o| o.id == id) {
+                if target.kind != TaskKind::Epic {
+                    findings.push(
+                        Finding::error(
+                            &tf.rel,
+                            "task.epic_target_not_epic",
+                            format!(
+                                "task {} references #{id} as its epic, but #{id} is a regular task (kind = {})",
+                                t.id,
+                                target.kind.as_str()
+                            ),
+                            "make the target an epic (kind = epic) or clear epic_id",
+                        )
+                        .with_field("epic_id"),
+                    );
+                }
             }
         }
         // structured dependencies (hand-edited data)
@@ -1366,6 +1408,32 @@ closed_at = "2026-09-13T18:45:00"
             codes.iter().filter(|c| **c == "task.dangling_ref").count(),
             2
         );
+    }
+
+    #[test]
+    fn epic_consistency_findings() {
+        let root = proj();
+        let r = root.path();
+        // 1: a task that is its own epic
+        let mut t1 = Task::new(1, "self".into(), "".into());
+        t1.epic_id = Some(1);
+        tasks::save_task(r, &t1).unwrap();
+        // 2: an epic that belongs to another epic
+        let mut t2 = Task::new(2, "nested".into(), "".into());
+        t2.kind = crate::model::TaskKind::Epic;
+        t2.epic_id = Some(1);
+        tasks::save_task(r, &t2).unwrap();
+        // 3: a task whose epic target is a regular task (4)
+        let mut t3 = Task::new(3, "bad target".into(), "".into());
+        t3.epic_id = Some(4);
+        tasks::save_task(r, &t3).unwrap();
+        tasks::save_task(r, &Task::new(4, "plain".into(), "".into())).unwrap();
+
+        let f = inspect(r);
+        let codes: Vec<&str> = f.iter().map(|x| x.code).collect();
+        assert!(codes.contains(&"task.epic_self"), "{codes:?}");
+        assert!(codes.contains(&"task.epic_nested"), "{codes:?}");
+        assert!(codes.contains(&"task.epic_target_not_epic"), "{codes:?}");
     }
 
     #[test]

@@ -874,6 +874,7 @@ fn mcp_schemas_expose_new_operations() {
         "create_follow_up",
         "update_task",
         "update_report_section",
+        "list_epics",
     ] {
         assert!(
             names.contains(&expected),
@@ -1026,6 +1027,124 @@ fn cli_mcp_parity_edit_report_complete_ready_context_reopen() {
     let all = tasks::load_tasks(r).unwrap();
     let fus: Vec<_> = all.iter().filter(|t| t.follow_up_of == Some(2)).collect();
     assert_eq!(fus.len(), 2);
+}
+
+// ===== scenario 5: epics (groups with derived progress) =====
+
+#[test]
+fn epic_workflow_derives_progress_groups_next_and_advances() {
+    let proj = Proj::new("epics");
+    let r = proj.root();
+
+    // an epic and two children join it through their epic_id
+    let (code, out, err) = run_jay(r, &["task", "new", "Release 1.0", "--kind", "epic"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("created epic 1"), "{out}");
+    assert_eq!(run_jay(r, &["task", "new", "child a", "--epic", "1"]).0, 0);
+    assert_eq!(run_jay(r, &["task", "new", "child b", "--epic", "1"]).0, 0);
+
+    // a non-epic target is refused
+    let (code, _, err) = run_jay(r, &["task", "new", "bad", "--epic", "2"]);
+    assert_ne!(code, 0);
+    assert!(err.contains("regular task"), "{err}");
+
+    // epic list shows derived progress
+    let (code, out, err) = run_jay(r, &["--no-color", "epic", "list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("0/2 closed"), "{out}");
+    let (_, json, _) = run_jay(r, &["epic", "list", "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], 1);
+    assert_eq!(rows[0]["total"], 2);
+    assert_eq!(rows[0]["closed"], 0);
+    assert_eq!(rows[0]["is_complete"], false);
+
+    // next groups ready children by epic and never lists the epic itself
+    let (code, out, err) = run_jay(r, &["--no-color", "next"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("epic #1: Release 1.0 (0/2 closed)"), "{out}");
+    assert!(out.contains("child a") && out.contains("child b"), "{out}");
+    let epic_ready = run_jay(r, &["next", "--json"]).1;
+    let ready: Vec<serde_json::Value> = serde_json::from_str(&epic_ready).unwrap();
+    assert_eq!(ready.len(), 2, "only the children are ready: {ready:?}");
+    assert!(ready.iter().all(|t| t["kind"] == "task"));
+
+    // close both children; the last closure advances the epic to review
+    std::fs::write(
+        r.join("child-report.json"),
+        r#"{"result":"done","validation":"checked","problems":[],"ideas":[],"decisions":[]}"#,
+    )
+    .unwrap();
+    for id in ["2", "3"] {
+        assert_eq!(run_jay(r, &["task", "start", id]).0, 0);
+        let (code, out, err) = run_jay(
+            r,
+            &["task", "complete", id, "--report-file", "child-report.json"],
+        );
+        assert_eq!(code, 0, "{err}");
+        if id == "3" {
+            assert!(
+                out.contains("epic #1 advanced to review"),
+                "last child closure must report the epic advance: {out}"
+            );
+        }
+    }
+    let epic = tasks::load_task(r, 1).unwrap().unwrap();
+    assert_eq!(epic.kind, jay::model::TaskKind::Epic);
+    assert_eq!(epic.status, TaskStatus::Review);
+    assert!(epic
+        .history
+        .last()
+        .unwrap()
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("children resolved"));
+
+    // epic show lists the children and their states
+    let (code, out, err) = run_jay(r, &["epic", "show", "1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("2/2 closed"), "{out}");
+    assert!(out.contains("child a") && out.contains("child b"), "{out}");
+
+    // and the epic itself closes with its own summary
+    std::fs::write(
+        r.join("epic-report.json"),
+        r#"{"result":"release delivered","validation":"all children closed","problems":[],"ideas":[],"decisions":[]}"#,
+    )
+    .unwrap();
+    let (code, out, err) = run_jay(
+        r,
+        &["task", "complete", "1", "--report-file", "epic-report.json"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        tasks::load_task(r, 1).unwrap().unwrap().status,
+        TaskStatus::Closed
+    );
+    let _ = out;
+}
+
+#[test]
+fn mcp_list_epics_and_create_epic() {
+    let proj = Proj::new("epics-mcp");
+    let r = proj.root();
+    let mut mcp = McpChild::start(r);
+    let epic = mcp.call(
+        "create_task",
+        serde_json::json!({"title": "E", "kind": "epic"}),
+    );
+    assert_eq!(epic["id"], 1);
+    assert_eq!(epic["kind"], "epic");
+    mcp.call(
+        "create_task",
+        serde_json::json!({"title": "c1", "epic_id": 1}),
+    );
+    let epics = mcp.call("list_epics", serde_json::json!({}));
+    assert_eq!(epics.as_array().unwrap().len(), 1);
+    assert_eq!(epics[0]["total"], 1);
+    assert_eq!(epics[0]["closed"], 0);
 }
 
 #[test]

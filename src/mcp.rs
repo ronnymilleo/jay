@@ -9,7 +9,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{tool, tool_handler, tool_router, transport::stdio, ErrorData as McpError, ServiceExt};
 use std::path::PathBuf;
 
-use crate::model::{KnowledgeEntry, KnowledgeKind, Priority, Task, TaskAction};
+use crate::model::{KnowledgeEntry, KnowledgeKind, Priority, Task, TaskAction, TaskKind};
 use crate::project::{self, Context, ProjectConfig};
 use crate::{knowledge, service, tasks};
 
@@ -131,6 +131,12 @@ struct ListTasksArgs {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ListEpicsArgs {
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct UpdateConfigArgs {
     field: String,
     value: String,
@@ -141,6 +147,9 @@ struct CreateTaskArgs {
     title: String,
     #[serde(default)]
     description: String,
+    /// What this is: "task" (default) or "epic".
+    #[serde(default)]
+    kind: Option<String>,
     priority: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     labels: Vec<String>,
@@ -699,7 +708,34 @@ impl Jay {
     }
 
     #[tool(
-        description = "Create a task (race-free id allocation). Args: title, description, priority, labels, estimates, deadline, links, acceptance, context, assignee, parent/epic/milestone, depends_on (validated project-local edges), dir (optional)"
+        description = "List epics (tasks with kind = epic) with derived progress from their children. Progress is never stored: closed counts only Closed children. Args: dir (optional)"
+    )]
+    async fn list_epics(
+        &self,
+        Parameters(args): Parameters<ListEpicsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = self.target_root(args.dir.as_deref())?;
+        let all = tasks::load_tasks(&root).map_err(mcp_err)?;
+        let rows: Vec<serde_json::Value> = crate::epic::list(&all)
+            .iter()
+            .map(|e| {
+                let p = crate::epic::progress(&all, e.id);
+                serde_json::json!({
+                    "id": e.id,
+                    "title": e.title,
+                    "status": e.status.as_str(),
+                    "total": p.total,
+                    "closed": p.closed,
+                    "cancelled": p.cancelled,
+                    "is_complete": p.is_complete(),
+                })
+            })
+            .collect();
+        Self::result_json(&rows)
+    }
+
+    #[tool(
+        description = "Create a task (race-free id allocation). Args: title, description, kind (task|epic, optional), priority, labels, estimates, deadline, links, acceptance, context, assignee, parent/epic/milestone, depends_on (validated project-local edges), dir (optional)"
     )]
     async fn create_task(
         &self,
@@ -707,8 +743,15 @@ impl Jay {
     ) -> Result<CallToolResult, McpError> {
         let root = self.target_root(args.dir.as_deref())?;
         let priority = parse_priority(args.priority.as_deref())?;
+        let kind = match args.kind.as_deref() {
+            Some(k) => k
+                .parse::<TaskKind>()
+                .map_err(|e: anyhow::Error| McpError::invalid_params(e.to_string(), None))?,
+            None => TaskKind::Task,
+        };
         let t = service::create_task(&root, |id| {
             let mut t = Task::new(id, args.title, args.description);
+            t.kind = kind;
             t.priority = priority;
             t.labels = args.labels;
             t.estimate_points = args.estimate_points;

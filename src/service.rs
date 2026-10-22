@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::model::{now_ts, Priority, Task, TaskAction, TaskStatus};
+use crate::model::{now_ts, Priority, Task, TaskAction, TaskKind, TaskStatus};
 use crate::project::{self, NEST_DIR};
 use crate::tasks;
 
@@ -171,6 +171,9 @@ pub struct TaskPatch {
     /// Free-form context.
     pub context: PatchField<String>,
     #[serde(default)]
+    /// Task kind ("task" or "epic"; parsed; required when present).
+    pub kind: PatchField<String>,
+    #[serde(default)]
     /// Optional owner.
     pub assignee: PatchField<String>,
     #[serde(default)]
@@ -252,6 +255,11 @@ fn apply_patch(task: &mut Task, p: TaskPatch) -> Result<()> {
     set_required("description", p.description, &mut task.description)?;
     set_required("acceptance", p.acceptance, &mut task.acceptance)?;
     set_required("context", p.context, &mut task.context)?;
+    match p.kind {
+        PatchField::Absent => {}
+        PatchField::Null => bail!("field 'kind' is required and cannot be null"),
+        PatchField::Value(s) => task.kind = s.parse::<TaskKind>()?,
+    }
     set_nullable(p.assignee, &mut task.assignee);
     match p.priority {
         PatchField::Absent => {}
@@ -579,6 +587,120 @@ pub fn validate_dependencies(root: &Path, task: &Task) -> Result<()> {
     check_dependency_edges(task, &others)
 }
 
+// ===== epics =====
+
+/// Validates a task's `epic_id` edge against the rest of the project: the
+/// target must exist and be an epic, a task cannot be its own epic, and an
+/// epic cannot itself belong to another epic. `all` must be every task in the
+/// project (including `task` when it already exists on disk).
+pub fn check_epic_edges(task: &Task, all: &[Task]) -> Result<()> {
+    if task.kind == TaskKind::Epic && task.epic_id.is_some() {
+        bail!(
+            "an epic cannot belong to another epic (task {} is an epic with an epic_id)",
+            task.id
+        );
+    }
+    if let Some(epic_id) = task.epic_id {
+        if epic_id == task.id {
+            bail!("task {} cannot be its own epic", task.id);
+        }
+        match all.iter().find(|t| t.id == epic_id) {
+            Some(target) if target.kind == TaskKind::Epic => {}
+            Some(target) => bail!(
+                "task {} references #{epic_id} as its epic, but #{epic_id} is a regular task (kind = {}); create it as an epic first",
+                task.id,
+                target.kind.as_str()
+            ),
+            None => bail!(
+                "task {} references epic #{epic_id}, which does not exist in this project (epics are local)",
+                task.id
+            ),
+        }
+    }
+    // Demoting an epic that still groups children would orphan them silently.
+    if task.kind == TaskKind::Task {
+        let children: Vec<i64> = all
+            .iter()
+            .filter(|t| t.epic_id == Some(task.id))
+            .map(|t| t.id)
+            .collect();
+        if !children.is_empty() {
+            bail!(
+                "task {} still groups epic children {}; change their epic_id before changing its kind to task",
+                task.id,
+                children
+                    .iter()
+                    .map(|i| format!("#{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Validates a task's epic edge against the on-disk project state.
+pub fn validate_epic_edges(root: &Path, task: &Task) -> Result<()> {
+    let all = tasks::load_tasks(root)?;
+    check_epic_edges(task, &all)
+}
+
+/// Refuses to close an epic while it still has open children. A cancelled
+/// child was explicitly descoped and counts as resolved.
+fn ensure_epic_children_resolved(root: &Path, epic: &Task) -> Result<()> {
+    if epic.kind != TaskKind::Epic {
+        return Ok(());
+    }
+    let all = tasks::load_tasks(root)?;
+    let open: Vec<i64> = all
+        .iter()
+        .filter(|t| t.epic_id == Some(epic.id))
+        .filter(|t| !matches!(t.status, TaskStatus::Closed | TaskStatus::Cancelled))
+        .map(|t| t.id)
+        .collect();
+    if !open.is_empty() {
+        bail!(
+            "epic {} cannot be closed while children {} are still open (close or cancel them first)",
+            epic.id,
+            open.iter()
+                .map(|i| format!("#{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// When `child` closes, advance its epic to review if every child is now
+/// closed and the epic is still open or started. Caller must hold the project
+/// lock. Returns the advanced epic id, if any.
+fn advance_epic_of_child_locked(root: &Path, child: &Task, actor: &str) -> Result<Option<i64>> {
+    let Some(epic_id) = child.epic_id else {
+        return Ok(None);
+    };
+    let all = tasks::load_tasks(root)?;
+    let Some(epic) = all.iter().find(|t| t.id == epic_id) else {
+        return Ok(None);
+    };
+    if epic.kind != TaskKind::Epic
+        || epic.blocked
+        || !matches!(epic.status, TaskStatus::Open | TaskStatus::Started)
+    {
+        return Ok(None);
+    }
+    if !crate::epic::progress(&all, epic_id).is_complete() {
+        return Ok(None);
+    }
+    mutate_task_locked(root, epic_id, |t| {
+        t.apply(
+            TaskAction::Review,
+            &crate::model::LifecycleCtx::new(actor, Some("all children resolved")),
+        )?;
+        Ok(())
+    })?;
+    Ok(Some(epic_id))
+}
+
 /// Ids of `t`'s dependencies that are not closed. Cancelled prerequisites do
 /// NOT count as completed; missing ids count as unmet.
 pub fn unmet_dependencies(all: &[Task], t: &Task) -> Vec<i64> {
@@ -593,11 +715,13 @@ pub fn unmet_dependencies(all: &[Task], t: &Task) -> Vec<i64> {
 }
 
 /// Ready work: open, unblocked tasks whose dependencies are all closed,
-/// sorted by priority rank then id. (Does not touch the manual blocked flag.)
+/// sorted by priority rank then id. Epics are groups, not units of work, so
+/// they are never listed as ready. (Does not touch the manual blocked flag.)
 pub fn ready_tasks(root: &Path) -> Result<Vec<Task>> {
     let all = tasks::load_tasks(root)?;
     let mut ready: Vec<Task> = all
         .iter()
+        .filter(|t| t.kind != TaskKind::Epic)
         .filter(|t| t.status == TaskStatus::Open && !t.blocked)
         .filter(|t| unmet_dependencies(&all, t).is_empty())
         .cloned()
@@ -620,6 +744,7 @@ pub fn create_task(root: &Path, build: impl FnOnce(i64) -> Task) -> Result<Task>
     let t = build(id);
     validate_record(&t)?;
     validate_dependencies(root, &t)?;
+    validate_epic_edges(root, &t)?;
     tasks::save_task(root, &t)?;
     Ok(t)
 }
@@ -631,6 +756,7 @@ pub fn patch_task(root: &Path, id: i64, patch: TaskPatch, actor: &str) -> Result
     mutate_task_locked(root, id, |t| {
         apply_patch(t, patch)?;
         validate_dependencies(root, t)?;
+        validate_epic_edges(root, t)?;
         t.actor = Some(actor.to_string());
         Ok(())
     })?;
@@ -656,6 +782,7 @@ pub fn replace_task(root: &Path, id: i64, r: TaskReplace, actor: &str) -> Result
         t.parent_id = r.parent_id;
         t.epic_id = r.epic_id;
         t.milestone_id = r.milestone_id;
+        validate_epic_edges(root, t)?;
         t.actor = Some(actor.to_string());
         Ok(())
     })?;
@@ -735,6 +862,7 @@ pub fn complete_task(root: &Path, id: i64, upd: ReportUpdate, actor: &str) -> Re
             task.status.as_str()
         );
     }
+    ensure_epic_children_resolved(root, &task)?;
     apply_report(&mut task, &upd, ReportMode::Replace)?;
     if local_started {
         task.apply(
@@ -751,6 +879,8 @@ pub fn complete_task(root: &Path, id: i64, upd: ReportUpdate, actor: &str) -> Re
     task.actor = Some(actor.to_string());
     task.updated_at = now_ts();
     write_task_preserving(&path, &task, &raw)?;
+    // The last closed child advances its epic to review, if any (same lock).
+    advance_epic_of_child_locked(root, &task, actor)?;
     Ok(task)
 }
 
@@ -814,11 +944,24 @@ pub fn apply_action(
                 }
             }
         }
+        if action == TaskAction::Done {
+            let all = tasks::load_tasks(root)?;
+            if let Some(t) = all.iter().find(|t| t.id == id) {
+                ensure_epic_children_resolved(root, t)?;
+            }
+        }
         mutate_task_locked(root, id, |t| {
             t.apply(action, &crate::model::LifecycleCtx::new(actor, reason))?;
             Ok(())
         })?;
-        tasks::load_task(root, id)?.ok_or_else(|| anyhow::anyhow!("task {id} not found"))?
+        let t =
+            tasks::load_task(root, id)?.ok_or_else(|| anyhow::anyhow!("task {id} not found"))?;
+        // A child that leaves the open set (closed or cancelled) may resolve
+        // its epic; advance that epic to review when it does.
+        if matches!(action, TaskAction::Done | TaskAction::Cancel) {
+            advance_epic_of_child_locked(root, &t, actor)?;
+        }
+        t
     };
     // External side effects run outside the lock/atomic-file claim.
     let config = project::load_config(root)?;
@@ -895,6 +1038,26 @@ pub fn move_task(root: &Path, id: i64, dest: &Path, actor: &str) -> Result<Task>
         bail!(
             "tasks {} are follow-ups of task {id}; clear their follow_up_of references explicitly before moving it",
             followers.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if let Some(epic_id) = task.epic_id {
+        bail!(
+            "task {id} belongs to epic #{epic_id} in this project; clear its epic_id explicitly before moving it (references must not silently break)"
+        );
+    }
+    let epic_children: Vec<i64> = all_source
+        .iter()
+        .filter(|t| t.epic_id == Some(id))
+        .map(|t| t.id)
+        .collect();
+    if !epic_children.is_empty() {
+        bail!(
+            "tasks {} are children of epic {id}; change their epic_id explicitly before moving it",
+            epic_children
+                .iter()
+                .map(|i| format!("#{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     let new_id = tasks::next_id(dest)?;
@@ -1723,6 +1886,208 @@ updated_at = "2026-09-11T01:13:03"
         assert!(move_task(&src, id, &dst, "human").is_err());
         // nothing moved
         assert!(tasks::load_task(&src, id).unwrap().is_some());
+        assert!(tasks::load_tasks(&dst).unwrap().is_empty());
+    }
+
+    // ===== epics =====
+
+    fn new_epic(root: &Path, title: &str) -> Task {
+        create_task(root, |id| {
+            let mut t = Task::new(id, title.into(), String::new());
+            t.kind = TaskKind::Epic;
+            t
+        })
+        .unwrap()
+    }
+
+    fn new_child(root: &Path, epic_id: i64, title: &str) -> Task {
+        create_task(root, |id| {
+            let mut t = Task::new(id, title.into(), String::new());
+            t.epic_id = Some(epic_id);
+            t
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn epic_edges_reject_self_nested_missing_and_non_epic() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let plain = task_with_deps(r, "plain", vec![]);
+
+        // child referencing a plain task as its epic
+        let e = create_task(r, |id| {
+            let mut t = Task::new(id, "child".into(), String::new());
+            t.epic_id = Some(plain.id);
+            t
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("regular task"), "{e}");
+
+        // self epic (a plain task pointing at itself)
+        let p = parse_task_patch(&format!(r#"{{"epic_id":{}}}"#, plain.id)).unwrap();
+        let e = patch_task(r, plain.id, p, "human").unwrap_err();
+        assert!(e.to_string().contains("cannot be its own epic"), "{e}");
+
+        // an epic cannot belong to another epic: make plain an epic, then point
+        // the other epic at it
+        patch_task(
+            r,
+            plain.id,
+            parse_task_patch(r#"{"kind":"epic"}"#).unwrap(),
+            "human",
+        )
+        .unwrap();
+        let p = parse_task_patch(&format!(r#"{{"epic_id":{}}}"#, plain.id)).unwrap();
+        let e = patch_task(r, epic.id, p, "human").unwrap_err();
+        assert!(e.to_string().contains("belong to another epic"), "{e}");
+
+        // missing epic
+        let e = create_task(r, |id| {
+            let mut t = Task::new(id, "orphan".into(), String::new());
+            t.epic_id = Some(999);
+            t
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("does not exist"), "{e}");
+    }
+
+    #[test]
+    fn an_epic_with_children_cannot_be_demoted_to_task() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let child = new_child(r, epic.id, "work");
+        let e = patch_task(
+            r,
+            epic.id,
+            parse_task_patch(r#"{"kind":"task"}"#).unwrap(),
+            "human",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains(&format!("#{}", child.id)), "{e}");
+        // clearing the child edge first allows the demotion
+        patch_task(
+            r,
+            child.id,
+            parse_task_patch(r#"{"epic_id":null}"#).unwrap(),
+            "human",
+        )
+        .unwrap();
+        patch_task(
+            r,
+            epic.id,
+            parse_task_patch(r#"{"kind":"task"}"#).unwrap(),
+            "human",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ready_skips_epics_but_lists_children() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let child = new_child(r, epic.id, "work");
+        let ready = ready_tasks(r).unwrap();
+        let ids: Vec<i64> = ready.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![child.id], "epic itself is not ready work");
+        let _ = epic;
+    }
+
+    #[test]
+    fn closing_the_last_child_advances_the_epic_to_review() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let a = new_child(r, epic.id, "a");
+        let b = new_child(r, epic.id, "b");
+
+        close(r, a.id);
+        assert_eq!(
+            tasks::load_task(r, epic.id).unwrap().unwrap().status,
+            TaskStatus::Open,
+            "epic waits while a child is still open"
+        );
+        close(r, b.id);
+        let advanced = tasks::load_task(r, epic.id).unwrap().unwrap();
+        assert_eq!(advanced.status, TaskStatus::Review);
+        let ev = advanced.history.last().unwrap();
+        assert_eq!(ev.reason.as_deref(), Some("all children resolved"));
+
+        // the epic can now be completed with its own summary
+        let upd: ReportUpdate = serde_json::from_str(
+            r#"{"result":"release delivered","validation":"all children closed"}"#,
+        )
+        .unwrap();
+        let done = complete_task(r, epic.id, upd, "human").unwrap();
+        assert_eq!(done.status, TaskStatus::Closed);
+    }
+
+    #[test]
+    fn epic_cannot_be_closed_while_children_are_open() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let child = new_child(r, epic.id, "work");
+
+        // move the epic to review manually (epics may skip started)
+        apply_action(r, epic.id, TaskAction::Review, "human", None).unwrap();
+        let upd: ReportUpdate = serde_json::from_str(r#"{"result":"r","validation":"v"}"#).unwrap();
+        let e = complete_task(r, epic.id, upd.clone(), "human").unwrap_err();
+        assert!(e.to_string().contains(&format!("#{}", child.id)), "{e}");
+
+        // the direct `done` action is gated the same way
+        apply_action(r, epic.id, TaskAction::Rewind, "human", None).unwrap();
+        apply_action(r, epic.id, TaskAction::Review, "human", None).unwrap();
+        update_report(r, epic.id, upd.clone(), ReportMode::Replace, "human").unwrap();
+        let e = apply_action(r, epic.id, TaskAction::Done, "human", None).unwrap_err();
+        assert!(e.to_string().contains("still open"), "{e}");
+    }
+
+    #[test]
+    fn a_cancelled_child_lets_the_epic_advance_and_close() {
+        let root = proj();
+        let r = root.path();
+        let epic = new_epic(r, "Release");
+        let done = new_child(r, epic.id, "done");
+        let descoped = new_child(r, epic.id, "descoped");
+
+        close(r, done.id);
+        apply_action(
+            r,
+            descoped.id,
+            TaskAction::Cancel,
+            "human",
+            Some("descoped"),
+        )
+        .unwrap();
+        // cancelled counts as resolved: the epic advanced on the last resolution
+        let epic_now = tasks::load_task(r, epic.id).unwrap().unwrap();
+        assert_eq!(epic_now.status, TaskStatus::Review);
+        let upd: ReportUpdate =
+            serde_json::from_str(r#"{"result":"shipped","validation":"one descoped"}"#).unwrap();
+        let closed = complete_task(r, epic.id, upd, "human").unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed);
+    }
+
+    #[test]
+    fn move_refused_while_epic_edges_exist() {
+        let base = tempfile::tempdir().unwrap();
+        let src = base.path().join("src");
+        let dst = base.path().join("dst");
+        init_project(&src, None).unwrap();
+        init_project(&dst, None).unwrap();
+        let epic = new_epic(&src, "Release");
+        let child = new_child(&src, epic.id, "work");
+
+        // moving the child breaks the epic_id reference
+        let e = move_task(&src, child.id, &dst, "human").unwrap_err();
+        assert!(e.to_string().contains("belongs to epic"), "{e}");
+        // moving the epic breaks its children
+        let e = move_task(&src, epic.id, &dst, "human").unwrap_err();
+        assert!(e.to_string().contains("are children"), "{e}");
         assert!(tasks::load_tasks(&dst).unwrap().is_empty());
     }
 
